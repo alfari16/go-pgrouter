@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/bxcodec/dbresolver/v2"
+	"github.com/alfari16/pg-consistent-replica"
 	_ "github.com/lib/pq"
 )
 

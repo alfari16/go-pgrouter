@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/bxcodec/dbresolver/v2"
+	"github.com/alfari16/pg-consistent-replica"
 )
 
 func TestOptionWithPrimaryDBs(t *testing.T) {

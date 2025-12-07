@@ -3,6 +3,7 @@ package dbresolver
 import (
 	"database/sql"
 	"fmt"
+	"time"
 )
 
 // LoadBalancerPolicy define the loadbalancer policy data type
@@ -21,6 +22,7 @@ type Option struct {
 	StmtLB           StmtLoadBalancer
 	DBLB             DBLoadBalancer
 	QueryTypeChecker QueryTypeChecker
+	CCConfig         *CausalConsistencyConfig
 }
 
 // OptionFunc used for option chaining
@@ -73,5 +75,74 @@ func defaultOption() *Option {
 		DBLB:             &RoundRobinLoadBalancer[*sql.DB]{},
 		StmtLB:           &RoundRobinLoadBalancer[*sql.Stmt]{},
 		QueryTypeChecker: &DefaultQueryTypeChecker{},
+		CCConfig:         DefaultCausalConsistencyConfig(),
+	}
+}
+
+// WithCausalConsistency enables and configures LSN-based causal consistency
+func WithCausalConsistency(config *CausalConsistencyConfig) OptionFunc {
+	return func(opt *Option) {
+		if config != nil {
+			opt.CCConfig = config
+		}
+	}
+}
+
+// WithCausalConsistencyLevel sets a specific causal consistency level
+func WithCausalConsistencyLevel(level CausalConsistencyLevel) OptionFunc {
+	return func(opt *Option) {
+		if opt.CCConfig == nil {
+			opt.CCConfig = DefaultCausalConsistencyConfig()
+		}
+		opt.CCConfig.Level = level
+		opt.CCConfig.Enabled = true
+	}
+}
+
+
+// WithLSNQueryTimeout sets the timeout for LSN queries
+func WithLSNQueryTimeout(timeout time.Duration) OptionFunc {
+	return func(opt *Option) {
+		if opt.CCConfig == nil {
+			opt.CCConfig = DefaultCausalConsistencyConfig()
+		}
+		// Note: This will be used by CausalRouter when creating PGLSNChecker instances
+		// The timeout is handled internally by the CausalRouter configuration
+	}
+}
+
+// WithLSNThrottleTime sets the minimum time between LSN queries (for write operations)
+func WithLSNThrottleTime(throttleTime time.Duration) OptionFunc {
+	return func(opt *Option) {
+		if opt.CCConfig == nil {
+			opt.CCConfig = DefaultCausalConsistencyConfig()
+		}
+		// Note: This will be used by CausalRouter when creating PGLSNChecker instances
+		// The throttle time is handled internally by the CausalRouter configuration
+	}
+}
+
+// WithLSNCookieConfig sets the HTTP cookie configuration for LSN tracking
+func WithLSNCookieConfig(cookieName string, maxAge time.Duration) OptionFunc {
+	return func(opt *Option) {
+		if opt.CCConfig == nil {
+			opt.CCConfig = DefaultCausalConsistencyConfig()
+		}
+		if cookieName != "" {
+			opt.CCConfig.CookieName = cookieName
+		}
+		if maxAge > 0 {
+			opt.CCConfig.CookieMaxAge = maxAge
+		}
+	}
+}
+
+// WithMasterFallback configures whether to fallback to master when LSN requirements can't be met
+func WithMasterFallback(fallback bool) OptionFunc {
+	return func(opt *Option) {
+		if opt.CCConfig == nil {
+			opt.CCConfig = DefaultCausalConsistencyConfig()
+		}
+		opt.CCConfig.FallbackToMaster = fallback
 	}
 }

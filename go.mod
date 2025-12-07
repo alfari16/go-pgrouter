@@ -1,6 +1,6 @@
-module github.com/bxcodec/dbresolver/v2
+module github.com/alfari16/pg-consistent-replica
 
-go 1.22
+go 1.25.5
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
@@ -10,20 +10,3 @@ require (
 )
 
 require github.com/stretchr/testify v1.8.1 // indirect
-
-retract (
-	// below versions doesn't support Update,Insert queries with "RETURNING CLAUSE"
-	//	v1.0.0
-	//    v1.0.0-beta
-	//    v1.0.1
-	//    v1.0.2
-	//    v1.1.0
-	v2.0.0
-	v2.0.0-beta.2
-	v2.0.0-beta
-	v2.0.0-alpha.5
-	v2.0.0-alpha.4
-	v2.0.0-alpha.3
-	v2.0.0-alpha.2
-	v2.0.0-alpha
-)

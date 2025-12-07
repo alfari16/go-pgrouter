@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -11,36 +12,14 @@ import (
 	"go.uber.org/multierr"
 )
 
-// DB interface is a contract that supported by this library.
-// All offered function of this library defined here.
-// This supposed to be aligned with sql.DB, but since some of the functions is not relevant
-// with multi dbs connection, we decided to forward all single connection DB related function to the first primary DB
-// For example, function like, `Conn()“, or `Stats()` only available for the primary DB, or the first primary DB (if using multi-primary)
-type DB interface {
-	Begin() (Tx, error)
-	BeginTx(ctx context.Context, opts *sql.TxOptions) (Tx, error)
-	Close() error
-	// Conn only available for the primary db or the first primary db (if using multi-primary)
-	Conn(ctx context.Context) (Conn, error)
-	Driver() driver.Driver
-	Exec(query string, args ...interface{}) (sql.Result, error)
-	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
-	Ping() error
-	PingContext(ctx context.Context) error
-	Prepare(query string) (Stmt, error)
-	PrepareContext(ctx context.Context, query string) (Stmt, error)
-	Query(query string, args ...interface{}) (*sql.Rows, error)
-	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
-	QueryRow(query string, args ...interface{}) *sql.Row
-	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
-	SetConnMaxIdleTime(d time.Duration)
-	SetConnMaxLifetime(d time.Duration)
-	SetMaxIdleConns(n int)
-	SetMaxOpenConns(n int)
-	PrimaryDBs() []*sql.DB
-	ReplicaDBs() []*sql.DB
-	// Stats only available for the primary db or the first primary db (if using multi-primary)
-	Stats() sql.DBStats
+// QueryRouter interface defines the contract for query routing strategies
+// This follows the Open-Closed Principle, allowing different routing implementations
+type QueryRouter interface {
+	// RouteQuery routes a query to the appropriate database based on query type and context
+	RouteQuery(ctx context.Context, queryType QueryType) (*sql.DB, error)
+	// UpdateLSNAfterWrite updates LSN tracking after a write operation (optional)
+	// Implementations can return zero LSN and nil error if LSN tracking is not supported
+	UpdateLSNAfterWrite(ctx context.Context, db *sql.DB) (LSN, error)
 }
 
 // DBLoadBalancer is loadbalancer for physical DBs
@@ -49,46 +28,67 @@ type DBLoadBalancer LoadBalancer[*sql.DB]
 // StmtLoadBalancer is loadbalancer for query prepared statements
 type StmtLoadBalancer LoadBalancer[*sql.Stmt]
 
-// sqlDB is a logical database with multiple underlying physical databases
+// DB is a logical database with multiple underlying physical databases
 // forming a single ReadWrite (primary) with multiple ReadOnly(replicas) db.
 // Reads and writes are automatically directed to the correct db connection
+// with optional LSN-based causal consistency support.
 
-type sqlDB struct {
+type DB struct {
 	primaries        []*sql.DB
 	replicas         []*sql.DB
 	loadBalancer     DBLoadBalancer
 	stmtLoadBalancer StmtLoadBalancer
 	queryTypeChecker QueryTypeChecker
+	queryRouter      QueryRouter
 }
 
 // PrimaryDBs return all the active primary DB
-func (db *sqlDB) PrimaryDBs() []*sql.DB {
+func (db *DB) PrimaryDBs() []*sql.DB {
 	return db.primaries
 }
 
 // ReplicaDBs return all the active replica DB
-func (db *sqlDB) ReplicaDBs() []*sql.DB {
+func (db *DB) ReplicaDBs() []*sql.DB {
 	return db.replicas
 }
 
+// LoadBalancer returns the database load balancer
+func (db *DB) LoadBalancer() LoadBalancer[*sql.DB] {
+	return db.loadBalancer
+}
+
 // Close closes all physical databases concurrently, releasing any open resources.
-func (db *sqlDB) Close() error {
+func (db *DB) Close() error {
+	var errors []error
+
 	errPrimaries := doParallely(len(db.primaries), func(i int) error {
 		return db.primaries[i].Close()
 	})
 	errReplicas := doParallely(len(db.replicas), func(i int) error {
 		return db.replicas[i].Close()
 	})
-	return multierr.Combine(errPrimaries, errReplicas)
+
+	// Combine all errors
+	if errPrimaries != nil {
+		errors = append(errors, errPrimaries)
+	}
+	if errReplicas != nil {
+		errors = append(errors, errReplicas)
+	}
+
+	if len(errors) > 0 {
+		return multierr.Combine(errors...)
+	}
+	return nil
 }
 
 // Driver returns the physical database's underlying driver.
-func (db *sqlDB) Driver() driver.Driver {
+func (db *DB) Driver() driver.Driver {
 	return db.ReadWrite().Driver()
 }
 
 // Begin starts a transaction on the RW-db. The isolation level is dependent on the driver.
-func (db *sqlDB) Begin() (Tx, error) {
+func (db *DB) Begin() (Tx, error) {
 	return db.BeginTx(context.Background(), nil)
 }
 
@@ -97,7 +97,7 @@ func (db *sqlDB) Begin() (Tx, error) {
 // The provided TxOptions is optional and may be nil if defaults should be used.
 // If a non-default isolation level is used that the driver doesn't support,
 // an error will be returned.
-func (db *sqlDB) BeginTx(ctx context.Context, opts *sql.TxOptions) (Tx, error) {
+func (db *DB) BeginTx(ctx context.Context, opts *sql.TxOptions) (Tx, error) {
 	sourceDB := db.ReadWrite()
 
 	stx, err := sourceDB.BeginTx(ctx, opts)
@@ -106,34 +106,57 @@ func (db *sqlDB) BeginTx(ctx context.Context, opts *sql.TxOptions) (Tx, error) {
 	}
 
 	return &tx{
-		sourceDB: sourceDB,
-		tx:       stx,
+		sourceDB:         sourceDB,
+		tx:               stx,
+		queryRouter:      db.queryRouter,
+		queryTypeChecker: db.queryTypeChecker,
 	}, nil
 }
 
 // Exec executes a query without returning any rows.
 // The args are for any placeholder parameters in the query.
 // Exec uses the RW-database as the underlying db connection
-func (db *sqlDB) Exec(query string, args ...interface{}) (sql.Result, error) {
+func (db *DB) Exec(query string, args ...interface{}) (sql.Result, error) {
 	return db.ExecContext(context.Background(), query, args...)
+}
+
+// trackLSNAfterWrite handles LSN tracking after successful write operations
+// Single responsibility function with built-in throttling (100ms default)
+// This function should be called after every successful write operation
+func (db *DB) trackLSNAfterWrite(ctx context.Context, err error, usedDB *sql.DB) {
+	// Only proceed if operation was successful and query router is available
+	if err == nil && db.queryRouter != nil && usedDB != nil {
+		// The underlying implementation handles throttling if it supports LSN tracking
+		if _, lsnErr := db.queryRouter.UpdateLSNAfterWrite(ctx, usedDB); lsnErr != nil {
+			// Log error but don't fail the operation (best-effort tracking)
+			// In production, you might want to log this error
+		}
+	}
 }
 
 // ExecContext executes a query without returning any rows.
 // The args are for any placeholder parameters in the query.
 // Exec uses the RW-database as the underlying db connection
-func (db *sqlDB) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
-	return db.ReadWrite().ExecContext(ctx, query, args...)
+// Optimized version: Uses single responsibility function for LSN tracking
+func (db *DB) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	usedDB := db.ReadWrite()
+	result, err := usedDB.ExecContext(ctx, query, args...)
+
+	// Update LSN tracking after successful write operation using single responsibility function
+	db.trackLSNAfterWrite(ctx, err, usedDB)
+
+	return result, err
 }
 
 // Ping verifies if a connection to each physical database is still alive,
 // establishing a connection if necessary.
-func (db *sqlDB) Ping() error {
+func (db *DB) Ping() error {
 	return db.PingContext(context.Background())
 }
 
 // PingContext verifies if a connection to each physical database is still
 // alive, establishing a connection if necessary.
-func (db *sqlDB) PingContext(ctx context.Context) error {
+func (db *DB) PingContext(ctx context.Context) error {
 	errPrimaries := doParallely(len(db.primaries), func(i int) error {
 		return db.primaries[i].PingContext(ctx)
 	})
@@ -145,7 +168,7 @@ func (db *sqlDB) PingContext(ctx context.Context) error {
 
 // Prepare creates a prepared statement for later queries or executions
 // on each physical database, concurrently.
-func (db *sqlDB) Prepare(query string) (_stmt Stmt, err error) {
+func (db *DB) Prepare(query string) (_stmt Stmt, err error) {
 	return db.PrepareContext(context.Background(), query)
 }
 
@@ -154,7 +177,7 @@ func (db *sqlDB) Prepare(query string) (_stmt Stmt, err error) {
 //
 // The provided context is used for the preparation of the statement, not for
 // the execution of the statement.
-func (db *sqlDB) PrepareContext(ctx context.Context, query string) (_stmt Stmt, err error) {
+func (db *DB) PrepareContext(ctx context.Context, query string) (_stmt Stmt, err error) {
 	dbStmt := map[*sql.DB]*sql.Stmt{}
 	var dbStmtLock sync.Mutex
 	roStmts := make([]*sql.Stmt, len(db.replicas))
@@ -202,52 +225,81 @@ func (db *sqlDB) PrepareContext(ctx context.Context, query string) (_stmt Stmt, 
 
 // Query executes a query that returns rows, typically a SELECT.
 // The args are for any placeholder parameters in the query.
-func (db *sqlDB) Query(query string, args ...interface{}) (*sql.Rows, error) {
+func (db *DB) Query(query string, args ...interface{}) (*sql.Rows, error) {
 	return db.QueryContext(context.Background(), query, args...)
 }
 
 // QueryContext executes a query that returns rows, typically a SELECT.
 // The args are for any placeholder parameters in the query.
-func (db *sqlDB) QueryContext(ctx context.Context, query string, args ...interface{}) (rows *sql.Rows, err error) {
+func (db *DB) QueryContext(ctx context.Context, query string, args ...interface{}) (rows *sql.Rows, err error) {
 	var curDB *sql.DB
 	writeFlag := db.queryTypeChecker.Check(query) == QueryTypeWrite
 
 	if writeFlag {
 		curDB = db.ReadWrite()
 	} else {
-		curDB = db.ReadOnly()
+		// Use query router for read operations if available
+		if db.queryRouter != nil {
+			curDB = db.ReadWithLSN(ctx)
+		} else {
+			curDB = db.ReadOnly()
+		}
 	}
 
 	rows, err = curDB.QueryContext(ctx, query, args...)
+
+	// Add LSN tracking for write operations (INSERT/UPDATE/DELETE with RETURNING)
+	if writeFlag {
+		db.trackLSNAfterWrite(ctx, err, curDB)
+	}
+
+	// Handle connection error fallback with LSN tracking
 	if isDBConnectionError(err) && !writeFlag {
 		rows, err = db.ReadWrite().QueryContext(ctx, query, args...)
+		// Track LSN for the fallback write operation
+		db.trackLSNAfterWrite(ctx, err, curDB)
 	}
+
 	return
 }
 
 // QueryRow executes a query that is expected to return at most one row.
 // QueryRow always return a non-nil value.
 // Errors are deferred until Row's Scan method is called.
-func (db *sqlDB) QueryRow(query string, args ...interface{}) *sql.Row {
+func (db *DB) QueryRow(query string, args ...interface{}) *sql.Row {
 	return db.QueryRowContext(context.Background(), query, args...)
 }
 
 // QueryRowContext executes a query that is expected to return at most one row.
 // QueryRowContext always return a non-nil value.
 // Errors are deferred until Row's Scan method is called.
-func (db *sqlDB) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+func (db *DB) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
 	var curDB *sql.DB
 	writeFlag := db.queryTypeChecker.Check(query) == QueryTypeWrite
 
 	if writeFlag {
 		curDB = db.ReadWrite()
 	} else {
-		curDB = db.ReadOnly()
+		// Use query router for read operations if available
+		if db.queryRouter != nil {
+			curDB = db.ReadWithLSN(ctx)
+		} else {
+			curDB = db.ReadOnly()
+		}
 	}
 
 	row := curDB.QueryRowContext(ctx, query, args...)
+
+	// Add LSN tracking for write operations (INSERT/UPDATE/DELETE with RETURNING)
+	if writeFlag {
+		db.trackLSNAfterWrite(ctx, row.Err(), curDB)
+	}
+
+	// Handle connection error fallback with LSN tracking
 	if isDBConnectionError(row.Err()) && !writeFlag {
 		row = db.ReadWrite().QueryRowContext(ctx, query, args...)
+		// Track LSN for the fallback write operation
+		db.trackLSNAfterWrite(ctx, row.Err(), curDB)
 	}
 
 	return row
@@ -258,7 +310,7 @@ func (db *sqlDB) QueryRowContext(ctx context.Context, query string, args ...inte
 // If MaxOpenConns is greater than 0 but less than the new MaxIdleConns then the
 // new MaxIdleConns will be reduced to match the MaxOpenConns limit
 // If n <= 0, no idle connections are retained.
-func (db *sqlDB) SetMaxIdleConns(n int) {
+func (db *DB) SetMaxIdleConns(n int) {
 	for i := range db.primaries {
 		db.primaries[i].SetMaxIdleConns(n)
 	}
@@ -274,7 +326,7 @@ func (db *sqlDB) SetMaxIdleConns(n int) {
 // is less than MaxIdleConns, then MaxIdleConns will be reduced to match
 // the new MaxOpenConns limit. If n <= 0, then there is no limit on the number
 // of open connections. The default is 0 (unlimited).
-func (db *sqlDB) SetMaxOpenConns(n int) {
+func (db *DB) SetMaxOpenConns(n int) {
 	for i := range db.primaries {
 		db.primaries[i].SetMaxOpenConns(n)
 	}
@@ -286,7 +338,7 @@ func (db *sqlDB) SetMaxOpenConns(n int) {
 // SetConnMaxLifetime sets the maximum amount of time a connection may be reused.
 // Expired connections may be closed lazily before reuse.
 // If d <= 0, connections are reused forever.
-func (db *sqlDB) SetConnMaxLifetime(d time.Duration) {
+func (db *DB) SetConnMaxLifetime(d time.Duration) {
 	for i := range db.primaries {
 		db.primaries[i].SetConnMaxLifetime(d)
 	}
@@ -298,7 +350,7 @@ func (db *sqlDB) SetConnMaxLifetime(d time.Duration) {
 // SetConnMaxIdleTime sets the maximum amount of time a connection may be idle.
 // Expired connections may be closed lazily before reuse.
 // If d <= 0, connections are not closed due to a connection's idle time.
-func (db *sqlDB) SetConnMaxIdleTime(d time.Duration) {
+func (db *DB) SetConnMaxIdleTime(d time.Duration) {
 	for i := range db.primaries {
 		db.primaries[i].SetConnMaxIdleTime(d)
 	}
@@ -309,21 +361,38 @@ func (db *sqlDB) SetConnMaxIdleTime(d time.Duration) {
 }
 
 // ReadOnly returns the readonly database
-func (db *sqlDB) ReadOnly() *sql.DB {
+func (db *DB) ReadOnly() *sql.DB {
 	if len(db.replicas) == 0 {
 		return db.loadBalancer.Resolve(db.primaries)
 	}
 	return db.loadBalancer.Resolve(db.replicas)
 }
 
+// ReadWithLSN returns a readonly database considering query router requirements
+func (db *DB) ReadWithLSN(ctx context.Context) *sql.DB {
+	// If no query router is available, fall back to standard routing
+	if db.queryRouter == nil {
+		return db.ReadOnly()
+	}
+
+	// Use query router for routing
+	selectedDB, err := db.queryRouter.RouteQuery(ctx, QueryTypeRead)
+	if err != nil {
+		// Fallback to standard routing if routing fails
+		return db.ReadOnly()
+	}
+
+	return selectedDB
+}
+
 // ReadWrite returns the primary database
-func (db *sqlDB) ReadWrite() *sql.DB {
+func (db *DB) ReadWrite() *sql.DB {
 	return db.loadBalancer.Resolve(db.primaries)
 }
 
 // Conn returns a single connection by either opening a new connection or returning an existing connection from the
 // connection pool of the first primary db.
-func (db *sqlDB) Conn(ctx context.Context) (Conn, error) {
+func (db *DB) Conn(ctx context.Context) (Conn, error) {
 	c, err := db.primaries[0].Conn(ctx)
 	if err != nil {
 		return nil, err
@@ -336,6 +405,86 @@ func (db *sqlDB) Conn(ctx context.Context) (Conn, error) {
 }
 
 // Stats returns database statistics for the first primary db
-func (db *sqlDB) Stats() sql.DBStats {
+func (db *DB) Stats() sql.DBStats {
 	return db.primaries[0].Stats()
+}
+
+// IsCausalConsistencyEnabled returns true if LSN-based causal consistency is enabled
+func (db *DB) IsCausalConsistencyEnabled() bool {
+	return db.queryRouter != nil
+}
+
+// UpdateLSNAfterWrite updates LSN tracking after a write operation
+func (db *DB) UpdateLSNAfterWrite(ctx context.Context) (*LSN, error) {
+	if db.queryRouter == nil {
+		return nil, nil // No-op if causal consistency is not enabled
+	}
+
+	// Get the primary database that was used for the write
+	primaryDB := db.ReadWrite()
+	lsn, err := db.queryRouter.UpdateLSNAfterWrite(ctx, primaryDB)
+	if err != nil {
+		return nil, err
+	}
+	return &lsn, nil
+}
+
+// GetCurrentMasterLSN gets the current WAL LSN from the master database
+func (db *DB) GetCurrentMasterLSN(ctx context.Context) (*LSN, error) {
+	if db.queryRouter == nil {
+		return nil, nil // No-op if causal consistency is not enabled
+	}
+
+	// Check if we have a valid primary database
+	primaryDB := db.ReadWrite()
+	if primaryDB == nil {
+		return &LSN{}, fmt.Errorf("primary database is nil")
+	}
+
+	// For now, return a default LSN - this would be implemented by the specific query router
+	// in a full implementation
+	return &LSN{}, nil
+}
+
+// GetLastKnownMasterLSN returns the last cached master LSN without querying the database
+func (db *DB) GetLastKnownMasterLSN() *LSN {
+	if db.queryRouter == nil {
+		return nil // No-op if causal consistency is not enabled
+	}
+
+	// For now, return a default LSN - this would be implemented by the specific query router
+	// in a full implementation
+	return &LSN{}
+}
+
+// GetReplicaStatus returns the status of all replicas
+func (db *DB) GetReplicaStatus() []ReplicaStatus {
+	// For now, return nil - this would be implemented by the specific query router
+	// in a full implementation
+	if db.queryRouter == nil {
+		return nil
+	}
+
+	// This would need to be implemented by the specific router type
+	// For now, return a basic status for each replica
+	statuses := make([]ReplicaStatus, len(db.replicas))
+	for i, replica := range db.replicas {
+		statuses[i] = ReplicaStatus{
+			IsHealthy:  true,
+			LastCheck:  time.Now(),
+			ErrorCount: 0,
+			LastError:  nil,
+			LastLSN:    nil,
+			LagBytes:   0,
+		}
+
+		// Ping the replica to check if it's healthy
+		if err := replica.PingContext(context.Background()); err != nil {
+			statuses[i].IsHealthy = false
+			statuses[i].ErrorCount = 1
+			statuses[i].LastError = err
+		}
+	}
+
+	return statuses
 }

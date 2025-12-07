@@ -46,7 +46,15 @@ func (lb RandomLoadBalancer[T]) predict(n int) int {
 	max := n - 1 //nolint
 	min := 0     //nolint
 	idx := r.Intn(max-min+1) + min
-	lb.randInt <- idx
+
+	// Make sure channel is not full before sending
+	select {
+	case lb.randInt <- idx:
+	default:
+		// Channel is full, drain it first
+		<-lb.randInt
+		lb.randInt <- idx
+	}
 	return idx
 }
 

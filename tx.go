@@ -3,6 +3,7 @@ package dbresolver
 import (
 	"context"
 	"database/sql"
+	"strings"
 )
 
 // Tx is a *sql.Tx wrapper.
@@ -23,12 +24,43 @@ type Tx interface {
 }
 
 type tx struct {
-	sourceDB *sql.DB
-	tx       *sql.Tx
+	sourceDB         *sql.DB
+	tx               *sql.Tx
+	queryRouter      QueryRouter
+	queryTypeChecker QueryTypeChecker
+	writesOccurred   bool
+}
+
+// trackLSNAfterWrite handles LSN tracking after successful write operations
+// Single responsibility function with built-in throttling (100ms default)
+// This function should be called after every successful write operation
+func (t *tx) trackLSNAfterWrite(ctx context.Context, err error) {
+	// Only proceed if operation was successful and query router is available
+	if err == nil && t.queryRouter != nil && t.sourceDB != nil {
+		// The underlying implementation handles throttling if it supports LSN tracking
+		if _, lsnErr := t.queryRouter.UpdateLSNAfterWrite(ctx, t.sourceDB); lsnErr != nil {
+			// Log error but don't fail the operation (best-effort tracking)
+			// In production, you might want to log this error
+		}
+	}
+}
+
+// markWriteOperation marks that a write operation has occurred during the transaction
+func (t *tx) markWriteOperation(ctx context.Context, err error) {
+	if err == nil {
+		t.writesOccurred = true
+	}
 }
 
 func (t *tx) Commit() error {
-	return t.tx.Commit()
+	err := t.tx.Commit()
+
+	// Track LSN after successful commit if writes occurred during transaction
+	if err == nil && t.writesOccurred {
+		t.trackLSNAfterWrite(context.Background(), err)
+	}
+
+	return err
 }
 
 func (t *tx) Rollback() error {
@@ -40,7 +72,12 @@ func (t *tx) Exec(query string, args ...interface{}) (sql.Result, error) {
 }
 
 func (t *tx) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
-	return t.tx.ExecContext(ctx, query, args...)
+	result, err := t.tx.ExecContext(ctx, query, args...)
+
+	// Mark write operation if it was successful
+	t.markWriteOperation(ctx, err)
+
+	return result, err
 }
 
 func (t *tx) Prepare(query string) (Stmt, error) {
@@ -61,7 +98,23 @@ func (t *tx) Query(query string, args ...interface{}) (*sql.Rows, error) {
 }
 
 func (t *tx) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
-	return t.tx.QueryContext(ctx, query, args...)
+	var writeFlag bool
+	if t.queryTypeChecker != nil {
+		writeFlag = t.queryTypeChecker.Check(query) == QueryTypeWrite
+	} else {
+		// Fallback: check for RETURNING clause if no query type checker available
+		_query := strings.ToUpper(query)
+		writeFlag = strings.Contains(_query, "RETURNING")
+	}
+
+	rows, err := t.tx.QueryContext(ctx, query, args...)
+
+	// Mark write operation if successful and it was a write query (e.g., with RETURNING)
+	if writeFlag {
+		t.markWriteOperation(ctx, err)
+	}
+
+	return rows, err
 }
 
 func (t *tx) QueryRow(query string, args ...interface{}) *sql.Row {
@@ -69,7 +122,23 @@ func (t *tx) QueryRow(query string, args ...interface{}) *sql.Row {
 }
 
 func (t *tx) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
-	return t.tx.QueryRowContext(ctx, query, args...)
+	var writeFlag bool
+	if t.queryTypeChecker != nil {
+		writeFlag = t.queryTypeChecker.Check(query) == QueryTypeWrite
+	} else {
+		// Fallback: check for RETURNING clause if no query type checker available
+		_query := strings.ToUpper(query)
+		writeFlag = strings.Contains(_query, "RETURNING")
+	}
+
+	row := t.tx.QueryRowContext(ctx, query, args...)
+
+	// Mark write operation if successful and it was a write query (e.g., with RETURNING)
+	if writeFlag {
+		t.markWriteOperation(ctx, row.Err())
+	}
+
+	return row
 }
 
 func (t *tx) Stmt(s Stmt) Stmt {
