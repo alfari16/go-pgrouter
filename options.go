@@ -22,6 +22,7 @@ type Option struct {
 	StmtLB           StmtLoadBalancer
 	DBLB             DBLoadBalancer
 	QueryTypeChecker QueryTypeChecker
+	QueryRouter      QueryRouter
 	CCConfig         *CausalConsistencyConfig
 }
 
@@ -43,7 +44,6 @@ func WithReplicaDBs(replicaDBs ...*sql.DB) OptionFunc {
 }
 
 // WithQueryTypeChecker sets the query type checker instance.
-// The default one just checks for the presence of the string "RETURNING" in the uppercase query.
 func WithQueryTypeChecker(checker QueryTypeChecker) OptionFunc {
 	return func(opt *Option) {
 		opt.QueryTypeChecker = checker
@@ -74,16 +74,16 @@ func defaultOption() *Option {
 	return &Option{
 		DBLB:             &RoundRobinLoadBalancer[*sql.DB]{},
 		StmtLB:           &RoundRobinLoadBalancer[*sql.Stmt]{},
-		QueryTypeChecker: &DefaultQueryTypeChecker{},
+		QueryTypeChecker: NewDefaultQueryTypeChecker(),
 		CCConfig:         DefaultCausalConsistencyConfig(),
 	}
 }
 
 // WithCausalConsistency enables and configures LSN-based causal consistency
-func WithCausalConsistency(config *CausalConsistencyConfig) OptionFunc {
+func WithCausalConsistency(router QueryRouter) OptionFunc {
 	return func(opt *Option) {
-		if config != nil {
-			opt.CCConfig = config
+		if router != nil {
+			opt.QueryRouter = router
 		}
 	}
 }
@@ -99,41 +99,14 @@ func WithCausalConsistencyLevel(level CausalConsistencyLevel) OptionFunc {
 	}
 }
 
-
 // WithLSNQueryTimeout sets the timeout for LSN queries
 func WithLSNQueryTimeout(timeout time.Duration) OptionFunc {
 	return func(opt *Option) {
 		if opt.CCConfig == nil {
 			opt.CCConfig = DefaultCausalConsistencyConfig()
 		}
-		// Note: This will be used by CausalRouter when creating PGLSNChecker instances
-		// The timeout is handled internally by the CausalRouter configuration
-	}
-}
-
-// WithLSNThrottleTime sets the minimum time between LSN queries (for write operations)
-func WithLSNThrottleTime(throttleTime time.Duration) OptionFunc {
-	return func(opt *Option) {
-		if opt.CCConfig == nil {
-			opt.CCConfig = DefaultCausalConsistencyConfig()
-		}
-		// Note: This will be used by CausalRouter when creating PGLSNChecker instances
-		// The throttle time is handled internally by the CausalRouter configuration
-	}
-}
-
-// WithLSNCookieConfig sets the HTTP cookie configuration for LSN tracking
-func WithLSNCookieConfig(cookieName string, maxAge time.Duration) OptionFunc {
-	return func(opt *Option) {
-		if opt.CCConfig == nil {
-			opt.CCConfig = DefaultCausalConsistencyConfig()
-		}
-		if cookieName != "" {
-			opt.CCConfig.CookieName = cookieName
-		}
-		if maxAge > 0 {
-			opt.CCConfig.CookieMaxAge = maxAge
-		}
+		opt.CCConfig.Timeout = timeout
+		opt.CCConfig.Enabled = true
 	}
 }
 
@@ -144,5 +117,15 @@ func WithMasterFallback(fallback bool) OptionFunc {
 			opt.CCConfig = DefaultCausalConsistencyConfig()
 		}
 		opt.CCConfig.FallbackToMaster = fallback
+		opt.CCConfig.Enabled = true
+	}
+}
+
+// WithCausalConsistencyConfig sets the complete causal consistency configuration
+func WithCausalConsistencyConfig(config *CausalConsistencyConfig) OptionFunc {
+	return func(opt *Option) {
+		if config != nil {
+			opt.CCConfig = config
+		}
 	}
 }

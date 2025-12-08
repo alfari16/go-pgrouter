@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
-	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -55,6 +53,12 @@ func (db *DB) ReplicaDBs() []*sql.DB {
 // LoadBalancer returns the database load balancer
 func (db *DB) LoadBalancer() LoadBalancer[*sql.DB] {
 	return db.loadBalancer
+}
+
+// IsCausalConsistencyEnabled returns true if causal consistency (LSN tracking) is enabled
+func (db *DB) IsCausalConsistencyEnabled() bool {
+	_, ok := db.queryRouter.(*CausalRouter)
+	return ok
 }
 
 // Close closes all physical databases concurrently, releasing any open resources.
@@ -108,7 +112,6 @@ func (db *DB) BeginTx(ctx context.Context, opts *sql.TxOptions) (Tx, error) {
 	return &tx{
 		sourceDB:         sourceDB,
 		tx:               stx,
-		queryRouter:      db.queryRouter,
 		queryTypeChecker: db.queryTypeChecker,
 	}, nil
 }
@@ -120,20 +123,6 @@ func (db *DB) Exec(query string, args ...interface{}) (sql.Result, error) {
 	return db.ExecContext(context.Background(), query, args...)
 }
 
-// trackLSNAfterWrite handles LSN tracking after successful write operations
-// Single responsibility function with built-in throttling (100ms default)
-// This function should be called after every successful write operation
-func (db *DB) trackLSNAfterWrite(ctx context.Context, err error, usedDB *sql.DB) {
-	// Only proceed if operation was successful and query router is available
-	if err == nil && db.queryRouter != nil && usedDB != nil {
-		// The underlying implementation handles throttling if it supports LSN tracking
-		if _, lsnErr := db.queryRouter.UpdateLSNAfterWrite(ctx, usedDB); lsnErr != nil {
-			// Log error but don't fail the operation (best-effort tracking)
-			// In production, you might want to log this error
-		}
-	}
-}
-
 // ExecContext executes a query without returning any rows.
 // The args are for any placeholder parameters in the query.
 // Exec uses the RW-database as the underlying db connection
@@ -141,9 +130,6 @@ func (db *DB) trackLSNAfterWrite(ctx context.Context, err error, usedDB *sql.DB)
 func (db *DB) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
 	usedDB := db.ReadWrite()
 	result, err := usedDB.ExecContext(ctx, query, args...)
-
-	// Update LSN tracking after successful write operation using single responsibility function
-	db.trackLSNAfterWrite(ctx, err, usedDB)
 
 	return result, err
 }
@@ -210,15 +196,14 @@ func (db *DB) PrepareContext(ctx context.Context, query string) (_stmt Stmt, err
 		return //nolint: nakedret
 	}
 
-	_query := strings.ToUpper(query)
-	writeFlag := strings.Contains(_query, "RETURNING")
+	writeFlag := db.queryTypeChecker.Check(query)
 
 	_stmt = &stmt{
 		loadBalancer: db.stmtLoadBalancer,
 		primaryStmts: primaryStmts,
 		replicaStmts: roStmts,
 		dbStmt:       dbStmt,
-		writeFlag:    writeFlag,
+		writeFlag:    writeFlag == QueryTypeWrite,
 	}
 	return _stmt, nil
 }
@@ -248,16 +233,9 @@ func (db *DB) QueryContext(ctx context.Context, query string, args ...interface{
 
 	rows, err = curDB.QueryContext(ctx, query, args...)
 
-	// Add LSN tracking for write operations (INSERT/UPDATE/DELETE with RETURNING)
-	if writeFlag {
-		db.trackLSNAfterWrite(ctx, err, curDB)
-	}
-
-	// Handle connection error fallback with LSN tracking
+	// Handle connection error fallback
 	if isDBConnectionError(err) && !writeFlag {
 		rows, err = db.ReadWrite().QueryContext(ctx, query, args...)
-		// Track LSN for the fallback write operation
-		db.trackLSNAfterWrite(ctx, err, curDB)
 	}
 
 	return
@@ -290,16 +268,9 @@ func (db *DB) QueryRowContext(ctx context.Context, query string, args ...interfa
 
 	row := curDB.QueryRowContext(ctx, query, args...)
 
-	// Add LSN tracking for write operations (INSERT/UPDATE/DELETE with RETURNING)
-	if writeFlag {
-		db.trackLSNAfterWrite(ctx, row.Err(), curDB)
-	}
-
-	// Handle connection error fallback with LSN tracking
+	// Handle connection error fallback
 	if isDBConnectionError(row.Err()) && !writeFlag {
 		row = db.ReadWrite().QueryRowContext(ctx, query, args...)
-		// Track LSN for the fallback write operation
-		db.trackLSNAfterWrite(ctx, row.Err(), curDB)
 	}
 
 	return row
@@ -399,92 +370,13 @@ func (db *DB) Conn(ctx context.Context) (Conn, error) {
 	}
 
 	return &conn{
-		sourceDB: db.primaries[0],
-		conn:     c,
+		sourceDB:         db.primaries[0],
+		conn:             c,
+		queryTypeChecker: db.queryTypeChecker,
 	}, nil
 }
 
 // Stats returns database statistics for the first primary db
 func (db *DB) Stats() sql.DBStats {
 	return db.primaries[0].Stats()
-}
-
-// IsCausalConsistencyEnabled returns true if LSN-based causal consistency is enabled
-func (db *DB) IsCausalConsistencyEnabled() bool {
-	return db.queryRouter != nil
-}
-
-// UpdateLSNAfterWrite updates LSN tracking after a write operation
-func (db *DB) UpdateLSNAfterWrite(ctx context.Context) (*LSN, error) {
-	if db.queryRouter == nil {
-		return nil, nil // No-op if causal consistency is not enabled
-	}
-
-	// Get the primary database that was used for the write
-	primaryDB := db.ReadWrite()
-	lsn, err := db.queryRouter.UpdateLSNAfterWrite(ctx, primaryDB)
-	if err != nil {
-		return nil, err
-	}
-	return &lsn, nil
-}
-
-// GetCurrentMasterLSN gets the current WAL LSN from the master database
-func (db *DB) GetCurrentMasterLSN(ctx context.Context) (*LSN, error) {
-	if db.queryRouter == nil {
-		return nil, nil // No-op if causal consistency is not enabled
-	}
-
-	// Check if we have a valid primary database
-	primaryDB := db.ReadWrite()
-	if primaryDB == nil {
-		return &LSN{}, fmt.Errorf("primary database is nil")
-	}
-
-	// For now, return a default LSN - this would be implemented by the specific query router
-	// in a full implementation
-	return &LSN{}, nil
-}
-
-// GetLastKnownMasterLSN returns the last cached master LSN without querying the database
-func (db *DB) GetLastKnownMasterLSN() *LSN {
-	if db.queryRouter == nil {
-		return nil // No-op if causal consistency is not enabled
-	}
-
-	// For now, return a default LSN - this would be implemented by the specific query router
-	// in a full implementation
-	return &LSN{}
-}
-
-// GetReplicaStatus returns the status of all replicas
-func (db *DB) GetReplicaStatus() []ReplicaStatus {
-	// For now, return nil - this would be implemented by the specific query router
-	// in a full implementation
-	if db.queryRouter == nil {
-		return nil
-	}
-
-	// This would need to be implemented by the specific router type
-	// For now, return a basic status for each replica
-	statuses := make([]ReplicaStatus, len(db.replicas))
-	for i, replica := range db.replicas {
-		statuses[i] = ReplicaStatus{
-			IsHealthy:  true,
-			LastCheck:  time.Now(),
-			ErrorCount: 0,
-			LastError:  nil,
-			LastLSN:    nil,
-			LagBytes:   0,
-		}
-
-		// Ping the replica to check if it's healthy
-		if err := replica.PingContext(context.Background()); err != nil {
-			statuses[i].IsHealthy = false
-			statuses[i].ErrorCount = 1
-			statuses[i].LastError = err
-		}
-	}
-
-	return statuses
 }

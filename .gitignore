@@ -27,3 +27,5 @@ cover.txt
 
 # Created by go-fuzz
 testdata/*
+
+.claude

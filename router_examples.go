@@ -57,7 +57,7 @@ func (r *RandomRouter) RouteQuery(ctx context.Context, queryType QueryType) (*sq
 }
 
 // UpdateLSNAfterWrite is a no-op for RandomRouter since it doesn't track LSN
-func (r *RandomRouter) UpdateLSNAfterWrite(ctx context.Context, db *sql.DB) (LSN, error) {
+func (r *RandomRouter) UpdateLSNAfterWrite(ctx context.Context) (LSN, error) {
 	// Random router doesn't track LSN, return zero LSN
 	return LSN{}, nil
 }
@@ -119,7 +119,7 @@ func (r *RoundRobinRouter) RouteQuery(ctx context.Context, queryType QueryType) 
 }
 
 // UpdateLSNAfterWrite is a no-op for RoundRobinRouter since it doesn't track LSN
-func (r *RoundRobinRouter) UpdateLSNAfterWrite(ctx context.Context, db *sql.DB) (LSN, error) {
+func (r *RoundRobinRouter) UpdateLSNAfterWrite(ctx context.Context) (LSN, error) {
 	// Round-robin router doesn't track LSN, return zero LSN
 	return LSN{}, nil
 }

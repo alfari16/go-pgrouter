@@ -3,7 +3,6 @@ package dbresolver
 import (
 	"context"
 	"database/sql"
-	"strings"
 )
 
 // Conn is a *sql.Conn wrapper.
@@ -20,8 +19,9 @@ type Conn interface {
 }
 
 type conn struct {
-	sourceDB *sql.DB
-	conn     *sql.Conn
+	sourceDB         *sql.DB
+	conn             *sql.Conn
+	queryTypeChecker QueryTypeChecker
 }
 
 func (c *conn) Close() error {
@@ -35,8 +35,9 @@ func (c *conn) BeginTx(ctx context.Context, opts *sql.TxOptions) (Tx, error) {
 	}
 
 	return &tx{
-		sourceDB: c.sourceDB,
-		tx:       stx,
+		sourceDB:         c.sourceDB,
+		tx:               stx,
+		queryTypeChecker: c.queryTypeChecker,
 	}, nil
 }
 
@@ -54,8 +55,7 @@ func (c *conn) PrepareContext(ctx context.Context, query string) (Stmt, error) {
 		return nil, err
 	}
 
-	_query := strings.ToUpper(query)
-	writeFlag := strings.Contains(_query, "RETURNING")
+	writeFlag := c.queryTypeChecker.Check(query) == QueryTypeWrite
 
 	return newSingleDBStmt(c.sourceDB, pstmt, writeFlag), nil
 }

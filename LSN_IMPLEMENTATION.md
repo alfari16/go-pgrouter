@@ -85,10 +85,8 @@ lsnConfig := &LSNTrackerConfig{
 ccConfig := &CausalConsistencyConfig{
     Enabled:          true,
     Level:            ReadYourWrites,
-    RequireCookie:    true,
-    CookieName:       "pg_min_lsn",
-    CookieMaxAge:     5 * time.Minute,
     FallbackToMaster: true,
+    Timeout:          5 * time.Second,
 }
 ```
 

@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/alfari16/pg-consistent-replica"
+	"github.com/alfari16/go-pgrouter"
 )
 
 func TestWrapDBWithMultiDBs(t *testing.T) {

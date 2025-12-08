@@ -21,7 +21,7 @@ func New(opts ...OptionFunc) *DB {
 	}
 
 	// Initialize query router after SqlDB is created (so it can implement DBProvider)
-	if opt.CCConfig != nil && opt.CCConfig.Enabled {
+	if opt.CCConfig != nil && opt.CCConfig.Enabled && opt.QueryRouter == nil {
 		sqlDB.queryRouter = NewCausalRouter(sqlDB, opt.CCConfig)
 	}
 

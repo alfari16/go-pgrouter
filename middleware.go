@@ -1,20 +1,60 @@
 package dbresolver
 
 import (
+	"context"
+	"fmt"
 	"net/http"
+	"sync"
 	"time"
 )
 
+// lsnResponseWriter wraps http.ResponseWriter to intercept WriteHeader calls
+// and automatically set LSN cookies for successful write operations
+type lsnResponseWriter struct {
+	http.ResponseWriter
+	middleware  *HTTPMiddleware
+	ctx         context.Context
+	wroteHeader bool
+	statusCode  int
+}
+
+// WriteHeader intercepts the WriteHeader call to set LSN cookies when appropriate
+func (lrw *lsnResponseWriter) WriteHeader(statusCode int) {
+	if !lrw.wroteHeader {
+		lrw.statusCode = statusCode
+		lrw.wroteHeader = true
+
+		// Check for 2xx status code and write operation
+		if statusCode >= 200 && statusCode < 300 {
+			fmt.Println("lsn cookies init")
+			if lsnCtx := GetLSNContext(lrw.ctx); lsnCtx != nil && lsnCtx.HasWriteOperation {
+				// Get the DB connection from context
+				db := GetDBConnection(lrw.ctx)
+				// Get LSN from router and set cookie
+				if lsn, err := lrw.middleware.router.UpdateLSNAfterWrite(lrw.ctx, db); err == nil && !lsn.IsZero() {
+					fmt.Println("lsn cookies set")
+					SetLSNCookie(lrw.ResponseWriter, lsn, lrw.middleware.cookieName, lrw.middleware.cookieMaxAge, lrw.middleware.cookieSecure)
+				}
+			}
+		}
+
+		lrw.ResponseWriter.WriteHeader(statusCode)
+	}
+}
+
 // HTTPMiddleware provides HTTP middleware for LSN-aware database routing
-// Optimized version: Simplified middleware without response wrapping
+// Optimized version with automatic cookie setting via response wrapper
 type HTTPMiddleware struct {
-	router       *CausalRouter
+	router       QueryRouter
 	cookieName   string
 	cookieMaxAge time.Duration
+	cookieSecure bool
+	wrapperPool  *sync.Pool
 }
 
 // NewHTTPMiddleware creates new HTTP middleware for LSN tracking
-func NewHTTPMiddleware(router *CausalRouter, cookieName string, maxAge time.Duration) *HTTPMiddleware {
+// maxAge determine your threshold of avg time sync between master and replica
+func NewHTTPMiddleware(router QueryRouter, cookieName string, maxAge time.Duration, useSecureCookie bool) *HTTPMiddleware {
 	if cookieName == "" {
 		cookieName = "pg_min_lsn"
 	}
@@ -22,15 +62,27 @@ func NewHTTPMiddleware(router *CausalRouter, cookieName string, maxAge time.Dura
 		maxAge = 5 * time.Minute
 	}
 
-	return &HTTPMiddleware{
+	m := &HTTPMiddleware{
 		router:       router,
 		cookieName:   cookieName,
 		cookieMaxAge: maxAge,
+		cookieSecure: useSecureCookie,
 	}
+
+	// Initialize wrapper pool for reuse
+	m.wrapperPool = &sync.Pool{
+		New: func() interface{} {
+			return &lsnResponseWriter{
+				middleware: m,
+			}
+		},
+	}
+
+	return m
 }
 
 // Middleware returns an HTTP middleware function
-// Optimized version: Simple cookie management without response wrapping
+// Enhanced version with automatic cookie setting via response wrapper
 func (m *HTTPMiddleware) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -39,22 +91,30 @@ func (m *HTTPMiddleware) Middleware(next http.Handler) http.Handler {
 		requiredLSN, hasLSN := GetLSNFromCookie(r, m.cookieName)
 
 		// Create LSN context only if cookie exists
+		lsnCtx := &LSNContext{}
 		if hasLSN {
-			lsnCtx := &LSNContext{
-				RequiredLSN: requiredLSN,
-				Level:       m.router.config.Level,
-			}
-			ctx = WithLSNContext(ctx, lsnCtx)
+			lsnCtx.RequiredLSN = requiredLSN
 		}
+		ctx = WithLSNContext(ctx, lsnCtx)
 
-		// Call next handler with updated context
-		next.ServeHTTP(w, r.WithContext(ctx))
+		// Get response writer from pool and set up for reuse
+		rw := m.wrapperPool.Get().(*lsnResponseWriter)
+		defer m.wrapperPool.Put(rw)
+
+		// Reset wrapper state for this request
+		rw.ResponseWriter = w
+		rw.ctx = ctx
+		rw.wroteHeader = false
+		rw.statusCode = 0
+
+		// Call next handler with wrapped response writer
+		next.ServeHTTP(rw, r.WithContext(ctx))
 	})
 }
 
 // SetLSNCookie is a helper function to set LSN cookie after write operations
 // Call this explicitly after write operations instead of relying on response wrapping
-func SetLSNCookie(w http.ResponseWriter, lsn LSN, cookieName string, maxAge time.Duration) {
+func SetLSNCookie(w http.ResponseWriter, lsn LSN, cookieName string, maxAge time.Duration, secure bool) {
 	if lsn.IsZero() {
 		return
 	}
@@ -70,7 +130,7 @@ func SetLSNCookie(w http.ResponseWriter, lsn LSN, cookieName string, maxAge time
 		Value:    lsn.String(),
 		MaxAge:   int(maxAge.Seconds()), // threshold on avg time your database sync took. the lesser the better since it dont need to query the LSN
 		HttpOnly: true,
-		Secure:   false, // Set to true in production with HTTPS
+		Secure:   secure, // Set to true in production with HTTPS
 		Path:     "/",
 		SameSite: http.SameSiteLaxMode,
 	})

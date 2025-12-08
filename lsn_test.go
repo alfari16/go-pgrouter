@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	_ "github.com/lib/pq"
 )
@@ -277,9 +278,8 @@ func TestCausalConsistencyConfig(t *testing.T) {
 		t.Errorf("Default level should be ReadYourWrites, got %v", config.Level)
 	}
 
-	
-	if config.CookieName != "pg_min_lsn" {
-		t.Errorf("Default CookieName should be 'pg_min_lsn', got %s", config.CookieName)
+	if config.Timeout != 5*time.Second {
+		t.Errorf("Default Timeout should be 5s, got %v", config.Timeout)
 	}
 }
 
@@ -318,26 +318,6 @@ func TestLSNContext(t *testing.T) {
 	}
 }
 
-// TestDBContext tests context management for DB connections
-func TestDBContext(t *testing.T) {
-	ctx := context.Background()
-
-	// Test that empty context returns nil
-	db := GetDBConnection(ctx)
-	if db != nil {
-		t.Error("Expected nil DB connection from empty context")
-	}
-
-	// This would normally be a real *sql.DB, but for testing we'll use nil
-	// since we're just testing the context storage/retrieval mechanism
-	ctx = WithDBConnection(ctx, nil)
-	retrievedDB := GetDBConnection(ctx)
-
-	if retrievedDB != nil {
-		t.Error("Expected to retrieve nil DB connection")
-	}
-}
-
 // MockDB creates a mock database connection for testing
 func MockDB() *sql.DB {
 	// This would normally open a real connection, but for unit tests
@@ -366,20 +346,11 @@ func TestNewDBResolverWithLSN(t *testing.T) {
 	db = New(
 		WithPrimaryDBs(primary),
 		WithReplicaDBs(replica),
-		WithCausalConsistency(ccConfig),
+		WithCausalConsistencyConfig(ccConfig),
 	)
 
 	if !db.IsCausalConsistencyEnabled() {
 		t.Error("Causal consistency should be enabled")
-	}
-
-	// Test that we can call the new methods without panicking
-	lsn, err := db.GetCurrentMasterLSN(context.Background())
-	if err == nil {
-		t.Error("Expected error when getting master LSN from mock DB")
-	}
-	if !lsn.IsZero() {
-		t.Error("Expected zero LSN from mock DB")
 	}
 }
 

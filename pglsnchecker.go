@@ -69,30 +69,6 @@ type PGLSNChecker struct {
 	queryTimeout time.Duration
 }
 
-// NewPGLSNChecker creates or returns a cached PostgreSQL LSN checker instance
-// Uses singleton pattern to avoid creating multiple instances for the same DB connection
-func NewPGLSNChecker(db *sql.DB, opts ...PGLSNCheckerOption) *PGLSNChecker {
-	if db == nil {
-		return nil
-	}
-
-	// Default configuration
-	queryTimeout := 5 * time.Second
-
-	// Apply options to get configuration
-	tempChecker := &PGLSNChecker{
-		db:           db,
-		queryTimeout: queryTimeout,
-	}
-
-	for _, opt := range opts {
-		opt(tempChecker)
-	}
-
-	// Use singleton registry with the configured values
-	return getOrCreateChecker(db, tempChecker.queryTimeout)
-}
-
 // PGLSNCheckerOption configures the PGLSNChecker
 type PGLSNCheckerOption func(*PGLSNChecker)
 

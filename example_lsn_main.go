@@ -6,11 +6,10 @@ package main
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"log"
 	"time"
 
-	"github.com/alfari16/pg-consistent-replica"
+	"github.com/alfari16/go-pgrouter"
 	_ "github.com/lib/pq"
 )
 
@@ -102,10 +101,8 @@ func setupLSNResolver(primaryDB, replicaDB *sql.DB) dbresolver.DB {
 	ccConfig := &dbresolver.CausalConsistencyConfig{
 		Enabled:          true,
 		Level:            dbresolver.ReadYourWrites,
-		RequireCookie:    true,
-		CookieName:       "pg_min_lsn",
-		CookieMaxAge:     5 * time.Minute,
 		FallbackToMaster: true,
+		Timeout:          3 * time.Second,
 	}
 
 	// Create database resolver with LSN features
@@ -114,7 +111,6 @@ func setupLSNResolver(primaryDB, replicaDB *sql.DB) dbresolver.DB {
 		dbresolver.WithReplicaDBs(replicaDB),
 		dbresolver.WithCausalConsistency(ccConfig),
 		dbresolver.WithLSNQueryTimeout(3*time.Second),
-		dbresolver.WithLSNThrottleTime(100*time.Millisecond),
 		dbresolver.WithLoadBalancer(dbresolver.RoundRobinLB),
 	)
 }
@@ -168,41 +164,6 @@ func demonstrateLSNQueries(db dbresolver.DB) {
 		return
 	}
 	log.Printf("✓ Inserted LSN product with ID: %d", productID)
-
-	// Update LSN tracking after write
-	lsn, err := db.UpdateLSNAfterWrite(ctx)
-	if err != nil {
-		log.Printf("⚠ Failed to update LSN after write: %v", err)
-	} else {
-		log.Printf("✓ Updated LSN after write: %s", lsn.String())
-	}
-
-	// Get current master LSN
-	currentLSN, err := db.GetCurrentMasterLSN(ctx)
-	if err != nil {
-		log.Printf("⚠ Failed to get current master LSN: %v", err)
-	} else {
-		log.Printf("✓ Current master LSN: %s", currentLSN.String())
-	}
-
-	// Query with LSN context (read-your-writes consistency)
-	lsnCtx := &dbresolver.LSNContext{
-		RequiredLSN: lsn,
-		Level:       dbresolver.ReadYourWrites,
-	}
-	ctx = dbresolver.WithLSNContext(ctx, lsnCtx)
-
-	var name string
-	var price float64
-	err = db.QueryRowContext(ctx,
-		"SELECT name, price FROM products WHERE id = $1", productID).
-		Scan(&name, &price)
-
-	if err != nil {
-		log.Printf("❌ Failed to query product with LSN context: %v", err)
-		return
-	}
-	log.Printf("✓ Queried product with LSN consistency: %s ($%.2f)", name, price)
 }
 
 func demonstrateManualLSNHandling(db dbresolver.DB) {
@@ -218,22 +179,6 @@ func demonstrateManualLSNHandling(db dbresolver.DB) {
 		log.Printf("❌ Failed to insert product: %v", err)
 		return
 	}
-
-	// Get master LSN
-	masterLSN, err := db.GetCurrentMasterLSN(ctx)
-	if err != nil {
-		log.Printf("❌ Failed to get master LSN: %v", err)
-		return
-	}
-	log.Printf("✓ Master LSN after insert: %s", masterLSN.String())
-
-	// Create LSN context for reading
-	lsnCtx := &dbresolver.LSNContext{
-		RequiredLSN: masterLSN,
-		Level:       dbresolver.ReadYourWrites,
-		ForceMaster: false, // Allow use of replica if caught up
-	}
-	ctx = dbresolver.WithLSNContext(ctx, lsnCtx)
 
 	// This query will use replica only if it has caught up to masterLSN
 	var name string
