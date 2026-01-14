@@ -135,14 +135,10 @@ func startServer() (*exec.Cmd, error) {
 	cmd.Dir = "."
 	cmd.Env = append(os.Environ(), "GOTRACEBACK=1")
 
-	fmt.Println("hirrr")
-
 	// Start the server in background
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start server: %w", err)
 	}
-
-	fmt.Println("hirrr 2")
 
 	return cmd, nil
 }

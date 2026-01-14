@@ -17,7 +17,7 @@ type QueryRouter interface {
 	RouteQuery(ctx context.Context, queryType QueryType) (*sql.DB, error)
 	// UpdateLSNAfterWrite updates LSN tracking after a write operation (optional)
 	// Implementations can return zero LSN and nil error if LSN tracking is not supported
-	UpdateLSNAfterWrite(ctx context.Context, db *sql.DB) (LSN, error)
+	UpdateLSNAfterWrite(ctx context.Context) (LSN, error)
 }
 
 // DBLoadBalancer is loadbalancer for physical DBs
@@ -128,8 +128,8 @@ func (db *DB) Exec(query string, args ...interface{}) (sql.Result, error) {
 // Exec uses the RW-database as the underlying db connection
 // Optimized version: Uses single responsibility function for LSN tracking
 func (db *DB) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
-	usedDB := db.ReadWrite()
-	result, err := usedDB.ExecContext(ctx, query, args...)
+	curDB := db.DbSelector(ctx, db.queryTypeChecker.Check(query))
+	result, err := curDB.ExecContext(ctx, query, args...)
 
 	return result, err
 }
@@ -217,26 +217,10 @@ func (db *DB) Query(query string, args ...interface{}) (*sql.Rows, error) {
 // QueryContext executes a query that returns rows, typically a SELECT.
 // The args are for any placeholder parameters in the query.
 func (db *DB) QueryContext(ctx context.Context, query string, args ...interface{}) (rows *sql.Rows, err error) {
-	var curDB *sql.DB
-	writeFlag := db.queryTypeChecker.Check(query) == QueryTypeWrite
-
-	if writeFlag {
-		curDB = db.ReadWrite()
-	} else {
-		// Use query router for read operations if available
-		if db.queryRouter != nil {
-			curDB = db.ReadWithLSN(ctx)
-		} else {
-			curDB = db.ReadOnly()
-		}
-	}
+	queryType := db.queryTypeChecker.Check(query)
+	curDB := db.DbSelector(ctx, queryType)
 
 	rows, err = curDB.QueryContext(ctx, query, args...)
-
-	// Handle connection error fallback
-	if isDBConnectionError(err) && !writeFlag {
-		rows, err = db.ReadWrite().QueryContext(ctx, query, args...)
-	}
 
 	return
 }
@@ -252,26 +236,10 @@ func (db *DB) QueryRow(query string, args ...interface{}) *sql.Row {
 // QueryRowContext always return a non-nil value.
 // Errors are deferred until Row's Scan method is called.
 func (db *DB) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
-	var curDB *sql.DB
-	writeFlag := db.queryTypeChecker.Check(query) == QueryTypeWrite
-
-	if writeFlag {
-		curDB = db.ReadWrite()
-	} else {
-		// Use query router for read operations if available
-		if db.queryRouter != nil {
-			curDB = db.ReadWithLSN(ctx)
-		} else {
-			curDB = db.ReadOnly()
-		}
-	}
+	queryType := db.queryTypeChecker.Check(query)
+	curDB := db.DbSelector(ctx, queryType)
 
 	row := curDB.QueryRowContext(ctx, query, args...)
-
-	// Handle connection error fallback
-	if isDBConnectionError(row.Err()) && !writeFlag {
-		row = db.ReadWrite().QueryRowContext(ctx, query, args...)
-	}
 
 	return row
 }
@@ -331,29 +299,35 @@ func (db *DB) SetConnMaxIdleTime(d time.Duration) {
 	}
 }
 
+// DbSelector returns a readonly database considering query router requirements
+func (db *DB) DbSelector(ctx context.Context, queryType QueryType) *sql.DB {
+	// Use query router for routing
+	if db.queryRouter != nil {
+		selectedDB, err := db.queryRouter.RouteQuery(ctx, queryType)
+		if err != nil {
+			// Fallback to standard routing if routing fails
+			return db.readWithoutLSN(queryType)
+		}
+
+		return selectedDB
+	}
+
+	return db.readWithoutLSN(queryType)
+}
+
+func (db *DB) readWithoutLSN(queryType QueryType) *sql.DB {
+	if queryType == QueryTypeWrite {
+		return db.ReadWrite()
+	}
+	return db.ReadOnly()
+}
+
 // ReadOnly returns the readonly database
 func (db *DB) ReadOnly() *sql.DB {
 	if len(db.replicas) == 0 {
 		return db.loadBalancer.Resolve(db.primaries)
 	}
 	return db.loadBalancer.Resolve(db.replicas)
-}
-
-// ReadWithLSN returns a readonly database considering query router requirements
-func (db *DB) ReadWithLSN(ctx context.Context) *sql.DB {
-	// If no query router is available, fall back to standard routing
-	if db.queryRouter == nil {
-		return db.ReadOnly()
-	}
-
-	// Use query router for routing
-	selectedDB, err := db.queryRouter.RouteQuery(ctx, QueryTypeRead)
-	if err != nil {
-		// Fallback to standard routing if routing fails
-		return db.ReadOnly()
-	}
-
-	return selectedDB
 }
 
 // ReadWrite returns the primary database

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"sync"
 	"time"
 )
 
@@ -57,7 +56,7 @@ func (r *SimpleRouter) RouteQuery(ctx context.Context, queryType QueryType) (*sq
 }
 
 // UpdateLSNAfterWrite is a no-op for SimpleRouter since it doesn't track LSN
-func (r *SimpleRouter) UpdateLSNAfterWrite(ctx context.Context, db *sql.DB) (LSN, error) {
+func (r *SimpleRouter) UpdateLSNAfterWrite(ctx context.Context) (LSN, error) {
 	// Simple router doesn't track LSN, return zero LSN
 	return LSN{}, nil
 }
@@ -104,6 +103,8 @@ type LSNContext struct {
 	Level             CausalConsistencyLevel
 	ForceMaster       bool
 	HasWriteOperation bool // Track if this request performed a write operation
+
+	masterDB *sql.DB
 }
 
 // ReplicaStatus represents the health and replication status of a replica
@@ -121,7 +122,6 @@ type contextKey string
 
 const (
 	lsnContextKey contextKey = "lsn_context"
-	dbContextKey  contextKey = "db_connection"
 )
 
 // WithLSNContext adds LSN requirements to the context
@@ -137,27 +137,10 @@ func GetLSNContext(ctx context.Context) *LSNContext {
 	return nil
 }
 
-// WithDBConnection stores the selected DB connection in context
-func WithDBConnection(ctx context.Context, db *sql.DB) context.Context {
-	return context.WithValue(ctx, dbContextKey, db)
-}
-
-// GetDBConnection retrieves the DB connection from context
-func GetDBConnection(ctx context.Context) *sql.DB {
-	if db, ok := ctx.Value(dbContextKey).(*sql.DB); ok {
-		return db
-	}
-	return nil
-}
-
 // CausalRouter provides LSN-aware database routing
 type CausalRouter struct {
 	config     *CausalConsistencyConfig
 	dbProvider DBProvider // Dependency injected to access databases
-
-	// Simple LSN tracking state
-	mu            sync.RWMutex
-	lastMasterLSN LSN
 
 	// Configuration for on-demand checkers
 	queryTimeout time.Duration
@@ -197,16 +180,17 @@ func (r *CausalRouter) RouteQuery(ctx context.Context, queryType QueryType) (*sq
 		return nil, fmt.Errorf("no primary databases available")
 	}
 
-	// If master is explicitly forced, use master
-	if lsnCtx != nil && lsnCtx.ForceMaster {
-		slog.Debug("RouteQuery: master forced, using primary")
-		return r.dbProvider.LoadBalancer().Resolve(primaries), nil
-	}
-
+	// If master is explicitly forced, use master or
 	// For write operations, always use master
-	if queryType == QueryTypeWrite {
-		slog.Debug("RouteQuery: write operation, using primary")
-		return r.dbProvider.LoadBalancer().Resolve(primaries), nil
+	if queryType == QueryTypeWrite || (lsnCtx != nil && lsnCtx.ForceMaster) {
+		slog.Debug("RouteQuery: write operation/master forced, using primary", slog.Int("query_type", int(queryType)), slog.Bool("force_master", lsnCtx.ForceMaster))
+		masterDB := r.dbProvider.LoadBalancer().Resolve(primaries)
+		if lsnCtx != nil {
+			lsnCtx.ForceMaster = true
+			lsnCtx.HasWriteOperation = true
+			lsnCtx.masterDB = masterDB
+		}
+		return masterDB, nil
 	}
 
 	// For read operations: check cookie first
@@ -304,15 +288,22 @@ func GetLSNFromCookie(r *http.Request, cookieName string) (LSN, bool) {
 
 // UpdateLSNAfterWrite updates the LSN context after a write operation using the specific DB
 // Optimized version: Event-driven, queries the specific DB that performed the write
-func (r *CausalRouter) UpdateLSNAfterWrite(ctx context.Context, db *sql.DB) (LSN, error) {
-	slog.Debug("UpdateLSNAfterWrite", "enabled", r.config.Enabled, "hasDB", db != nil)
+func (r *CausalRouter) UpdateLSNAfterWrite(ctx context.Context) (LSN, error) {
+	slog.Debug("UpdateLSNAfterWrite", "enabled", r.config.Enabled)
 
-	if !r.config.Enabled || db == nil {
-		slog.Debug("UpdateLSNAfterWrite: LSN tracking not enabled or no DB provided, returning zero LSN")
+	if !r.config.Enabled {
+		slog.Debug("UpdateLSNAfterWrite: LSN tracking not enabled, returning zero LSN")
+		return LSN{}, nil
+	}
+
+	lsnCtx := GetLSNContext(ctx)
+	if lsnCtx == nil || lsnCtx.masterDB == nil {
+		slog.Debug("UpdateLSNAfterWrite: no LSN context or masterDB available, returning zero LSN")
 		return LSN{}, nil
 	}
 
 	// Create checker on-demand for the specific DB using router's configuration
+	db := lsnCtx.masterDB
 	checker := getOrCreateChecker(db, r.queryTimeout)
 	slog.Debug("UpdateLSNAfterWrite: created/updated checker", "queryTimeout", r.queryTimeout)
 
@@ -324,59 +315,9 @@ func (r *CausalRouter) UpdateLSNAfterWrite(ctx context.Context, db *sql.DB) (LSN
 
 	slog.Debug("UpdateLSNAfterWrite: got master LSN", "masterLSN", masterLSN)
 
-	// Update internal master LSN tracking
-	r.mu.Lock()
-	r.lastMasterLSN = masterLSN
-	r.mu.Unlock()
-
 	// Update context with new LSN requirement
-	lsnCtx := GetLSNContext(ctx)
-	if lsnCtx == nil {
-		lsnCtx = &LSNContext{
-			Level: r.config.Level,
-		}
-		slog.Debug("UpdateLSNAfterWrite: created new LSN context", "level", r.config.Level)
-	}
 	lsnCtx.RequiredLSN = masterLSN
 	slog.Debug("UpdateLSNAfterWrite: updated LSN context with new required LSN", "requiredLSN", masterLSN)
 
-	// Store updated context
-	ctx = WithLSNContext(ctx, lsnCtx)
-
 	return masterLSN, nil
-}
-
-// GetCurrentMasterLSN gets the current WAL LSN from the master database
-func (r *CausalRouter) GetCurrentMasterLSN(ctx context.Context) (LSN, error) {
-	if !r.config.Enabled {
-		return LSN{}, fmt.Errorf("LSN tracking not enabled")
-	}
-
-	primaries := r.dbProvider.PrimaryDBs()
-	if len(primaries) == 0 {
-		return LSN{}, fmt.Errorf("no primary databases available")
-	}
-
-	// Use the first primary database
-	primary := primaries[0]
-	checker := getOrCreateChecker(primary, r.queryTimeout)
-
-	lsn, err := checker.GetCurrentWALLSN(ctx)
-	if err != nil {
-		return LSN{}, fmt.Errorf("failed to get master LSN: %w", err)
-	}
-
-	// Update cached LSN
-	r.mu.Lock()
-	r.lastMasterLSN = lsn
-	r.mu.Unlock()
-
-	return lsn, nil
-}
-
-// GetLastKnownMasterLSN returns the last cached master LSN without querying the database
-func (r *CausalRouter) GetLastKnownMasterLSN() LSN {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.lastMasterLSN
 }

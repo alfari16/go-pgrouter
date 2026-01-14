@@ -117,6 +117,7 @@ func createOrderHandler(db *dbresolver.DB) http.HandlerFunc {
 
 		// Return success response
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
 		fmt.Fprintf(w, `{"id": %d, "customer_name": "%s", "amount": %.2f, "status": "%s", "created_at": "%s"}`,
 			orderID, customerName, amount, status, time.Now().Format(time.RFC3339))
 	}
@@ -248,6 +249,7 @@ func healthHandler(db *dbresolver.DB) http.HandlerFunc {
 
 		// Return JSON response
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{
 			"healthy": %t,
 			"lsn_enabled": %t,

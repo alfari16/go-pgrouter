@@ -2,7 +2,6 @@ package dbresolver
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -26,13 +25,9 @@ func (lrw *lsnResponseWriter) WriteHeader(statusCode int) {
 
 		// Check for 2xx status code and write operation
 		if statusCode >= 200 && statusCode < 300 {
-			fmt.Println("lsn cookies init")
 			if lsnCtx := GetLSNContext(lrw.ctx); lsnCtx != nil && lsnCtx.HasWriteOperation {
-				// Get the DB connection from context
-				db := GetDBConnection(lrw.ctx)
 				// Get LSN from router and set cookie
-				if lsn, err := lrw.middleware.router.UpdateLSNAfterWrite(lrw.ctx, db); err == nil && !lsn.IsZero() {
-					fmt.Println("lsn cookies set")
+				if lsn, err := lrw.middleware.router.UpdateLSNAfterWrite(lrw.ctx); err == nil && !lsn.IsZero() {
 					SetLSNCookie(lrw.ResponseWriter, lsn, lrw.middleware.cookieName, lrw.middleware.cookieMaxAge, lrw.middleware.cookieSecure)
 				}
 			}
@@ -40,6 +35,13 @@ func (lrw *lsnResponseWriter) WriteHeader(statusCode int) {
 
 		lrw.ResponseWriter.WriteHeader(statusCode)
 	}
+}
+
+func (lrw *lsnResponseWriter) reset(ctx context.Context, w http.ResponseWriter) {
+	lrw.ResponseWriter = w
+	lrw.ctx = ctx
+	lrw.wroteHeader = false
+	lrw.statusCode = 0
 }
 
 // HTTPMiddleware provides HTTP middleware for LSN-aware database routing
@@ -101,11 +103,7 @@ func (m *HTTPMiddleware) Middleware(next http.Handler) http.Handler {
 		rw := m.wrapperPool.Get().(*lsnResponseWriter)
 		defer m.wrapperPool.Put(rw)
 
-		// Reset wrapper state for this request
-		rw.ResponseWriter = w
-		rw.ctx = ctx
-		rw.wroteHeader = false
-		rw.statusCode = 0
+		rw.reset(ctx, w)
 
 		// Call next handler with wrapped response writer
 		next.ServeHTTP(rw, r.WithContext(ctx))
