@@ -33,14 +33,14 @@ func TestHTTPMiddleware(t *testing.T) {
 	// Create a test handler that simulates a write operation
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		_, _ = w.Write([]byte("OK"))
 	})
 
 	// Wrap the handler with middleware
 	wrappedHandler := middleware.Middleware(testHandler)
 
 	// Create a test request
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequest("GET", "/", http.NoBody)
 	rec := httptest.NewRecorder()
 
 	// Serve the request
@@ -98,14 +98,14 @@ func TestHTTPMiddlewareWithExistingLSNCookie(t *testing.T) {
 		}
 
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		_, _ = w.Write([]byte("OK"))
 	})
 
 	// Wrap the handler with middleware
 	wrappedHandler := middleware.Middleware(testHandler)
 
 	// Create a test request with existing LSN cookie
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequest("GET", "/", http.NoBody)
 	req.AddCookie(&http.Cookie{
 		Name:  "test_lsn",
 		Value: "1/ABCDEF",

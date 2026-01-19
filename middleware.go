@@ -126,7 +126,7 @@ func SetLSNCookie(w http.ResponseWriter, lsn LSN, cookieName string, maxAge time
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    lsn.String(),
-		MaxAge:   int(maxAge.Seconds()), // threshold on avg time your database sync took. the lesser the better since it dont need to query the LSN
+		MaxAge:   int(maxAge.Seconds()), // threshold on avg time your database sync took.
 		HttpOnly: true,
 		Secure:   secure, // Set to true in production with HTTPS
 		Path:     "/",

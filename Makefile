@@ -36,6 +36,9 @@ test: run-tests $(TPARSE) ## Run Tests & parse details
 	@cat gotestsum.json.out | $(TPARSE) -all -notests
 
 
+lint-prepare: $(GOLANGCI) ## Prepares linting environment
+	@echo "Linting environment prepared"
+
 lint: $(GOLANGCI) ## Runs golangci-lint with predefined configuration
 	@echo "Applying linter"
 	golangci-lint version

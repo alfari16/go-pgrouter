@@ -25,7 +25,7 @@ func NewRandomRouter(dbProvider DBProvider) *RandomRouter {
 }
 
 // RouteQuery routes queries to randomly selected databases
-func (r *RandomRouter) RouteQuery(ctx context.Context, queryType QueryType) (*sql.DB, error) {
+func (r *RandomRouter) RouteQuery(_ context.Context, queryType QueryType) (*sql.DB, error) {
 	if r.dbProvider == nil {
 		return nil, fmt.Errorf("no database provider available")
 	}
@@ -45,7 +45,9 @@ func (r *RandomRouter) RouteQuery(ctx context.Context, queryType QueryType) (*sq
 
 	case QueryTypeRead:
 		// For reads, randomly select from all available databases
-		allDBs := append(primaries, replicas...)
+		allDBs := make([]*sql.DB, 0, len(primaries)+len(replicas))
+		allDBs = append(allDBs, primaries...)
+		allDBs = append(allDBs, replicas...)
 		selected := allDBs[r.rand.Intn(len(allDBs))]
 		return selected, nil
 
@@ -57,7 +59,7 @@ func (r *RandomRouter) RouteQuery(ctx context.Context, queryType QueryType) (*sq
 }
 
 // UpdateLSNAfterWrite is a no-op for RandomRouter since it doesn't track LSN
-func (r *RandomRouter) UpdateLSNAfterWrite(ctx context.Context) (LSN, error) {
+func (r *RandomRouter) UpdateLSNAfterWrite(_ context.Context) (LSN, error) {
 	// Random router doesn't track LSN, return zero LSN
 	return LSN{}, nil
 }
@@ -79,7 +81,7 @@ func NewRoundRobinRouter(dbProvider DBProvider) *RoundRobinRouter {
 }
 
 // RouteQuery routes queries using round-robin selection
-func (r *RoundRobinRouter) RouteQuery(ctx context.Context, queryType QueryType) (*sql.DB, error) {
+func (r *RoundRobinRouter) RouteQuery(_ context.Context, queryType QueryType) (*sql.DB, error) {
 	if r.dbProvider == nil {
 		return nil, fmt.Errorf("no database provider available")
 	}
@@ -119,7 +121,7 @@ func (r *RoundRobinRouter) RouteQuery(ctx context.Context, queryType QueryType) 
 }
 
 // UpdateLSNAfterWrite is a no-op for RoundRobinRouter since it doesn't track LSN
-func (r *RoundRobinRouter) UpdateLSNAfterWrite(ctx context.Context) (LSN, error) {
+func (r *RoundRobinRouter) UpdateLSNAfterWrite(_ context.Context) (LSN, error) {
 	// Round-robin router doesn't track LSN, return zero LSN
 	return LSN{}, nil
 }

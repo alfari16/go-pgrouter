@@ -115,23 +115,27 @@ func (lsn LSN) Subtract(other LSN) uint64 {
 }
 
 // Add adds the specified number of bytes to this LSN and returns a new LSN
+//
+//nolint:mnd // Magic number 32 is the bit size for upper/lower split
 func (lsn LSN) Add(bytes uint64) LSN {
 	// Convert LSN to 64-bit integer
 	current := (uint64(lsn.Upper) << 32) | uint64(lsn.Lower)
-	new := current + bytes
+	newValue := current + bytes
 
 	// Convert back to LSN
 	return LSN{
-		Upper: uint32(new >> 32),
-		Lower: uint32(new & 0xFFFFFFFF),
+		Upper: uint32(newValue >> 32),        //nolint:gosec // G115 - overflow is expected for LSN
+		Lower: uint32(newValue & 0xFFFFFFFF), //nolint:gosec,mnd // G115 - overflow expected for LSN arithmetic
 	}
 }
 
 // LSNFromUint64 creates an LSN from a 64-bit integer representation
+//
+//nolint:mnd // Magic number 32 is the bit size for upper/lower split
 func LSNFromUint64(value uint64) LSN {
 	return LSN{
-		Upper: uint32(value >> 32),
-		Lower: uint32(value & 0xFFFFFFFF),
+		Upper: uint32(value >> 32),        //nolint:gosec // G115 - overflow is expected for LSN
+		Lower: uint32(value & 0xFFFFFFFF), //nolint:gosec,mnd // G115 - overflow expected for LSN arithmetic
 	}
 }
 

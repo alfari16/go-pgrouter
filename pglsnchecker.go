@@ -157,6 +157,7 @@ func (c *PGLSNChecker) GetWALLagBytes(ctx context.Context, fromLSN, toLSN LSN) (
 	defer cancel()
 
 	var lagBytes uint64
+	// #nosec G201 -- LSN values are validated by ParseLSN before being passed here
 	query := fmt.Sprintf("SELECT pg_wal_lsn_diff('%s'::pg_lsn, '%s'::pg_lsn)", toLSN.String(), fromLSN.String())
 
 	err := c.db.QueryRowContext(queryCtx, query).Scan(&lagBytes)

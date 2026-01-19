@@ -1,7 +1,6 @@
 package dbresolver
 
 import (
-	"database/sql"
 	"fmt"
 	"testing"
 
@@ -17,13 +16,6 @@ type DBConfig struct {
 var LoadBalancerPolicies = []LoadBalancerPolicy{
 	RandomLB,
 	RoundRobinLB,
-}
-
-func handleDBError(t *testing.T, err error) {
-	if err != nil {
-		t.Errorf("db error: %s", err)
-	}
-
 }
 
 func testMW(t *testing.T, config DBConfig) {
@@ -194,11 +186,6 @@ BEGIN_TEST_CASE:
 	}
 
 	goto BEGIN_TEST_CASE
-}
-
-func createMock() (db *sql.DB, mock sqlmock.Sqlmock, err error) {
-	db, mock, err = sqlmock.New(sqlmock.MonitorPingsOption(true), sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
-	return
 }
 
 type QueryMatcher struct {

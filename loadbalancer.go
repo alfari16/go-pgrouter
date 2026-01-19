@@ -79,5 +79,5 @@ func (lb *RoundRobinLoadBalancer[T]) predict(n int) int {
 		return 0
 	}
 	// counter := lb.counter
-	return int(atomic.AddUint64(&lb.counter, 1) % uint64(n))
+	return int(atomic.AddUint64(&lb.counter, 1) % uint64(n)) //nolint:gosec // G115 - n is bounded by checked conditions
 }

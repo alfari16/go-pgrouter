@@ -305,7 +305,7 @@ func TestLSNContext(t *testing.T) {
 	retrievedCtx := GetLSNContext(ctx)
 
 	if retrievedCtx == nil {
-		t.Error("Expected to retrieve LSN context")
+		t.Fatal("Expected to retrieve LSN context")
 	}
 
 	if retrievedCtx.RequiredLSN.Upper != requiredLSN.Upper ||

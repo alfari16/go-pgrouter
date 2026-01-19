@@ -30,7 +30,7 @@ type tx struct {
 }
 
 // markWriteOperation marks that a write operation has occurred during the transaction
-func (t *tx) markWriteOperation(ctx context.Context, err error) {
+func (t *tx) markWriteOperation(_ context.Context, err error) {
 	if err == nil {
 		t.writesOccurred = true
 	}

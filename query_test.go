@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+//nolint:funlen // Test function covers many edge cases for query type detection
 func TestDefaultQueryTypeChecker(t *testing.T) {
 	checker := NewDefaultQueryTypeChecker()
 

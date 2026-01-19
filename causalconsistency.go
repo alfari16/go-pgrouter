@@ -29,7 +29,7 @@ func NewSimpleRouter(dbProvider DBProvider) *SimpleRouter {
 }
 
 // RouteQuery implements basic read/write routing
-func (r *SimpleRouter) RouteQuery(ctx context.Context, queryType QueryType) (*sql.DB, error) {
+func (r *SimpleRouter) RouteQuery(_ context.Context, queryType QueryType) (*sql.DB, error) {
 	if r.dbProvider == nil {
 		return nil, fmt.Errorf("no database provider available")
 	}
@@ -56,7 +56,7 @@ func (r *SimpleRouter) RouteQuery(ctx context.Context, queryType QueryType) (*sq
 }
 
 // UpdateLSNAfterWrite is a no-op for SimpleRouter since it doesn't track LSN
-func (r *SimpleRouter) UpdateLSNAfterWrite(ctx context.Context) (LSN, error) {
+func (r *SimpleRouter) UpdateLSNAfterWrite(_ context.Context) (LSN, error) {
 	// Simple router doesn't track LSN, return zero LSN
 	return LSN{}, nil
 }
@@ -161,6 +161,8 @@ func NewCausalRouter(dbProvider DBProvider, config *CausalConsistencyConfig) *Ca
 
 // RouteQuery routes a query to the appropriate database based on LSN requirements
 // Optimized version: Cookie-first approach with simplified logic
+//
+//nolint:gocyclo,funlen // Complex routing logic with multiple consistency levels
 func (r *CausalRouter) RouteQuery(ctx context.Context, queryType QueryType) (*sql.DB, error) {
 	slog.Debug("RouteQuery", "queryType", queryType, "enabled", r.config.Enabled)
 
@@ -183,8 +185,14 @@ func (r *CausalRouter) RouteQuery(ctx context.Context, queryType QueryType) (*sq
 	// If master is explicitly forced, use master or
 	// For write operations, always use master
 	if queryType == QueryTypeWrite || (lsnCtx != nil && lsnCtx.ForceMaster) {
-		slog.Debug("RouteQuery: write operation/master forced, using primary", slog.Int("query_type", int(queryType)), slog.Bool("force_master", lsnCtx.ForceMaster))
 		masterDB := r.dbProvider.LoadBalancer().Resolve(primaries)
+		forceMaster := false
+		if lsnCtx != nil {
+			forceMaster = lsnCtx.ForceMaster
+		}
+		slog.Debug("RouteQuery: write operation/master forced, using primary",
+			slog.Int("query_type", int(queryType)),
+			slog.Bool("force_master", forceMaster))
 		if lsnCtx != nil {
 			lsnCtx.ForceMaster = true
 			lsnCtx.HasWriteOperation = true
@@ -201,11 +209,7 @@ func (r *CausalRouter) RouteQuery(ctx context.Context, queryType QueryType) (*sq
 		if lsnCtx != nil && !lsnCtx.RequiredLSN.IsZero() {
 			slog.Debug("RouteQuery: checking replica status", "requiredLSN", lsnCtx.RequiredLSN)
 			// Has LSN requirement - check if replica has caught up
-			useReplica, db, err := r.shouldUseReplica(ctx, lsnCtx.RequiredLSN)
-			if err != nil {
-				slog.Debug("RouteQuery: failed to check replica status", "error", err)
-				return nil, fmt.Errorf("failed to check replica status: %w", err)
-			}
+			useReplica, db := r.shouldUseReplica(ctx, lsnCtx.RequiredLSN)
 			if useReplica {
 				slog.Debug("RouteQuery: using replica", "requiredLSN", lsnCtx.RequiredLSN)
 				return db, nil
@@ -248,16 +252,16 @@ func (r *CausalRouter) RouteQuery(ctx context.Context, queryType QueryType) (*sq
 }
 
 // shouldUseReplica determines if a replica should be used based on LSN requirements
-func (r *CausalRouter) shouldUseReplica(ctx context.Context, requiredLSN LSN) (bool, *sql.DB, error) {
+func (r *CausalRouter) shouldUseReplica(_ context.Context, requiredLSN LSN) (bool, *sql.DB) {
 	replicas := r.dbProvider.ReplicaDBs()
 	if len(replicas) == 0 {
-		return false, nil, nil
+		return false, nil
 	}
 
 	// If LSN is zero, use load balancer to select any replica
 	if requiredLSN.IsZero() {
 		selected := r.dbProvider.LoadBalancer().Resolve(replicas)
-		return true, selected, nil
+		return true, selected
 	}
 
 	// Try the load balancer selected replica first
@@ -266,14 +270,14 @@ func (r *CausalRouter) shouldUseReplica(ctx context.Context, requiredLSN LSN) (b
 	// Check if this replica has caught up to the required LSN
 	checker := getOrCreateChecker(selected, r.queryTimeout)
 
-	replicaLSN, err := checker.GetLastReplayLSN(ctx)
+	replicaLSN, err := checker.GetLastReplayLSN(context.Background())
 	if err == nil && !replicaLSN.LessThan(requiredLSN) {
 		// Selected replica is ready to use
-		return true, selected, nil
+		return true, selected
 	}
 
 	// Selected replica is lagged or error occurred, fall back to master
-	return false, nil, nil
+	return false, nil
 }
 
 // GetLSNFromCookie extracts LSN from HTTP request cookies
