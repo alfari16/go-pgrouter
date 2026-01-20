@@ -1,11 +1,12 @@
 # Golang PostgreSQL HA Router
 
-[![Go](https://github.com/bxcodec/dbresolver/actions/workflows/go.yml/badge.svg?branch=main)](https://github.com/alfari16/go-pgrouter/actions/workflows/go.yml)
-[![Go.Dev](https://img.shields.io/badge/go.dev-reference-007d9c?logo=go&logoColor=white)](https://pkg.go.dev/github.com/alfari16/go-pgrouter/v2?tab=doc)
+[![Go](https://github.com/alfari16/go-pgrouter/actions/workflows/go.yml/badge.svg?branch=main)](https://github.com/alfari16/go-pgrouter/actions/workflows/go.yml)
+[![Go.Dev](https://img.shields.io/badge/go.dev-reference-007d9c?logo=go&logoColor=white)](https://pkg.go.dev/github.com/alfari16/go-pgrouter?tab=doc)
 ![PostgreSQL LSN Support](https://img.shields.io/badge/LSN-PostgreSQL%20Ready-blue)
 ![Causal Consistency](https://img.shields.io/badge/Consistency-Read--Your--Writes-green)
 
-Golang Database Resolver with **PostgreSQL LSN-based causal consistency** for any multiple database connections topology, eg. master-slave replication database, cross-region application.
+Golang Database Resolver with **PostgreSQL LSN-based causal consistency** for any multiple database connections
+topology, eg. master-slave replication database, cross-region application.
 
 ## ✨ Features
 
@@ -22,7 +23,8 @@ Golang Database Resolver with **PostgreSQL LSN-based causal consistency** for an
 
 ### What Problem Does LSN Solve?
 
-In typical master-replica setups, writes go to the master and reads go to replicas. However, replication lag can cause users to see stale data immediately after making writes:
+In typical master-replica setups, writes go to the master and reads go to replicas. However, replication lag can cause
+users to see stale data immediately after making writes:
 
 ```
 User writes to master → Data replicates to replica (delayed)
@@ -55,7 +57,7 @@ graph TD
 ## 📦 Installation
 
 ```shell
-go get -u github.com/bxcodec/dbresolver/v2
+go get -u github.com/alfari16/go-pgrouter
 ```
 
 ## ⚡ Quick Start
@@ -67,73 +69,73 @@ go get -u github.com/bxcodec/dbresolver/v2
 package main
 
 import (
-    "context"
-    "database/sql"
-    "log"
-    "time"
+	"context"
+	"database/sql"
+	"log"
+	"time"
 
-    "github.com/bxcodec/dbresolver/v2"
-    _ "github.com/lib/pq"
+	"github.com/alfari16/go-pgrouter"
+	_ "github.com/lib/pq"
 )
 
 func main() {
-    // Open database connections
-    primaryDB, err := sql.Open("postgres",
-        "host=localhost port=5432 user=postgresrw dbname=mydb sslmode=disable")
-    if err != nil {
-        log.Fatal(err)
-    }
+	// Open database connections
+	primaryDB, err := sql.Open("postgres",
+		"host=localhost port=5432 user=postgresrw dbname=mydb sslmode=disable")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-    replicaDB, err := sql.Open("postgres",
-        "host=localhost port=5433 user=postgresro dbname=mydb sslmode=disable")
-    if err != nil {
-        log.Fatal(err)
-    }
+	replicaDB, err := sql.Open("postgres",
+		"host=localhost port=5433 user=postgresro dbname=mydb sslmode=disable")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-    // Configure LSN-based causal consistency
-    ccConfig := &dbresolver.CausalConsistencyConfig{
-        Enabled:          true,                          // Enable LSN features
-        Level:            dbresolver.ReadYourWrites,     // Consistency level
-        FallbackToMaster: true,                          // Fall back to master when needed
-        RequireCookie:    false,                         // Don't require cookies for this example
-        Timeout:          3 * time.Second,               // LSN query timeout
-    }
+	// Configure LSN-based causal consistency
+	ccConfig := &dbresolver.CausalConsistencyConfig{
+		Enabled:          true,                      // Enable LSN features
+		Level:            dbresolver.ReadYourWrites, // Consistency level
+		FallbackToMaster: true,                      // Fall back to master when needed
+		RequireCookie:    false,                     // Don't require cookies for this example
+		Timeout:          3 * time.Second,           // LSN query timeout
+	}
 
-    // Create resolver with LSN support
-    db := dbresolver.New(
-        dbresolver.WithPrimaryDBs(primaryDB),
-        dbresolver.WithReplicaDBs(replicaDB),
-        dbresolver.WithCausalConsistency(ccConfig),
-        dbresolver.WithLSNQueryTimeout(3*time.Second),
-        dbresolver.WithLoadBalancer(dbresolver.RoundRobinLB),
-    )
-    defer db.Close()
+	// Create resolver with LSN support
+	db := dbresolver.New(
+		dbresolver.WithPrimaryDBs(primaryDB),
+		dbresolver.WithReplicaDBs(replicaDB),
+		dbresolver.WithCausalConsistency(ccConfig),
+		dbresolver.WithLSNQueryTimeout(3*time.Second),
+		dbresolver.WithLoadBalancer(dbresolver.RoundRobinLB),
+	)
+	defer db.Close()
 
-    // Check if LSN is enabled
-    if db.IsCausalConsistencyEnabled() {
-        log.Println("✅ LSN-based causal consistency is active")
-    }
+	// Check if LSN is enabled
+	if db.IsCausalConsistencyEnabled() {
+		log.Println("✅ LSN-based causal consistency is active")
+	}
 
-    // Write operation - updates LSN tracking
-    result, err := db.ExecContext(context.Background(),
-        "INSERT INTO users (name) VALUES ($1)", "Alice")
-    if err != nil {
-        log.Fatal(err)
-    }
+	// Write operation - updates LSN tracking
+	result, err := db.ExecContext(context.Background(),
+		"INSERT INTO users (name) VALUES ($1)", "Alice")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-    // This read will intelligently choose replica or master
-    // based on whether the replica has caught up
-    var user User
-    err = db.QueryRowContext(context.Background(),
-        "SELECT * FROM users WHERE name = $1", "Alice").
-        Scan(&user.ID, &user.Name, &user.Email)
+	// This read will intelligently choose replica or master
+	// based on whether the replica has caught up
+	var user User
+	err = db.QueryRowContext(context.Background(),
+		"SELECT * FROM users WHERE name = $1", "Alice").
+		Scan(&user.ID, &user.Name, &user.Email)
 
-    if err == nil {
-        log.Printf("✅ Successfully read user: %+v", user)
-        // The query automatically used:
-        // - Replica if it has caught up to the write
-        // - Master if the replica is lagging behind
-    }
+	if err == nil {
+		log.Printf("✅ Successfully read user: %+v", user)
+		// The query automatically used:
+		// - Replica if it has caught up to the write
+		// - Master if the replica is lagging behind
+	}
 }
 ```
 
@@ -150,67 +152,67 @@ func main() {
 package main
 
 import (
-    "net/http"
-    "time"
+	"net/http"
+	"time"
 
-    "github.com/bxcodec/dbresolver/v2"
+	"github.com/alfari16/go-pgrouter"
 )
 
 func main() {
-    // Setup your database resolver with LSN
-    db := setupLSNResolver() // Same as LSN-Enabled Setup example
+	// Setup your database resolver with LSN
+	db := setupLSNResolver() // Same as LSN-Enabled Setup example
 
-    // Create causal router for middleware
-    router := dbresolver.NewCausalRouter(
-        db.GetPrimaryDB(),
-        db.GetReplicaDBs(),
-        &dbresolver.CausalConsistencyConfig{
-            Enabled:       true,
-            Level:         dbresolver.ReadYourWrites,
-            RequireCookie: true,
-            CookieName:    "pg_min_lsn",
-            CookieMaxAge:  5 * time.Minute,
-        },
-    )
+	// Create causal router for middleware
+	router := dbresolver.NewCausalRouter(
+		db.GetPrimaryDB(),
+		db.GetReplicaDBs(),
+		&dbresolver.CausalConsistencyConfig{
+			Enabled:       true,
+			Level:         dbresolver.ReadYourWrites,
+			RequireCookie: true,
+			CookieName:    "pg_min_lsn",
+			CookieMaxAge:  5 * time.Minute,
+		},
+	)
 
-    // Create HTTP middleware
-    middleware := dbresolver.NewHTTPMiddleware(
-        router,              // LSN-aware router
-        "pg_min_lsn",        // Cookie name
-        5*time.Minute,       // Cookie max age
-        true,                // Secure cookie (HTTPS only)
-        true,                // HttpOnly cookie
-    )
+	// Create HTTP middleware
+	middleware := dbresolver.NewHTTPMiddleware(
+		router,        // LSN-aware router
+		"pg_min_lsn",  // Cookie name
+		5*time.Minute, // Cookie max age
+		true,          // Secure cookie (HTTPS only)
+		true,          // HttpOnly cookie
+	)
 
-    // Apply to your handlers
-    http.Handle("/users", middleware(http.HandlerFunc(getUsers)))
-    http.Handle("/users/create", middleware(http.HandlerFunc(createUser)))
+	// Apply to your handlers
+	http.Handle("/users", middleware(http.HandlerFunc(getUsers)))
+	http.Handle("/users/create", middleware(http.HandlerFunc(createUser)))
 
-    http.ListenAndServe(":8080", nil)
+	http.ListenAndServe(":8080", nil)
 }
 
 // createUser handler - writes set LSN cookie automatically
 func createUser(w http.ResponseWriter, r *http.Request) {
-    db := getDBFromContext(r.Context())
+	db := getDBFromContext(r.Context())
 
-    _, err := db.ExecContext(r.Context(),
-        "INSERT INTO users (name) VALUES ($1)", r.FormValue("name"))
+	_, err := db.ExecContext(r.Context(),
+		"INSERT INTO users (name) VALUES ($1)", r.FormValue("name"))
 
-    // LSN cookie is automatically set by the middleware
-    // with the master's current LSN
+	// LSN cookie is automatically set by the middleware
+	// with the master's current LSN
 }
 
 // getUsers handler - reads use LSN cookie if present
 func getUsers(w http.ResponseWriter, r *http.Request) {
-    db := getDBFromContext(r.Context())
+	db := getDBFromContext(r.Context())
 
-    // Query automatically routes:
-    // - To replica if it has caught up to cookie LSN
-    // - To master if replica is lagging
-    rows, err := db.QueryContext(r.Context(),
-        "SELECT * FROM users")
+	// Query automatically routes:
+	// - To replica if it has caught up to cookie LSN
+	// - To master if replica is lagging
+	rows, err := db.QueryContext(r.Context(),
+		"SELECT * FROM users")
 
-    // Process results...
+	// Process results...
 }
 ```
 
@@ -225,57 +227,57 @@ func getUsers(w http.ResponseWriter, r *http.Request) {
 package main
 
 import (
-    "context"
-    "database/sql"
+	"context"
+	"database/sql"
 
-    "github.com/bxcodec/dbresolver/v2"
+	"github.com/alfari16/go-pgrouter"
 )
 
 func advancedLSNUsage(db dbresolver.DB) error {
-    ctx := context.Background()
+	ctx := context.Background()
 
-    // Perform a write operation
-    result, err := db.ExecContext(ctx,
-        "INSERT INTO products (name, price) VALUES ($1, $2)",
-        "Laptop", 999.99)
-    if err != nil {
-        return err
-    }
+	// Perform a write operation
+	result, err := db.ExecContext(ctx,
+		"INSERT INTO products (name, price) VALUES ($1, $2)",
+		"Laptop", 999.99)
+	if err != nil {
+		return err
+	}
 
-    // Explicitly update LSN after write
-    lsn, err := db.UpdateLSNAfterWrite(ctx)
-    if err != nil {
-        return err
-    }
+	// Explicitly update LSN after write
+	lsn, err := db.UpdateLSNAfterWrite(ctx)
+	if err != nil {
+		return err
+	}
 
-    // Store this LSN for future operations
-    lastWriteLSN := lsn
+	// Store this LSN for future operations
+	lastWriteLSN := lsn
 
-    // Create LSN context for strict consistency
-    lsnCtx := &dbresolver.LSNContext{
-        RequiredLSN: lastWriteLSN,
-        Level:       dbresolver.ReadYourWrites,
-    }
-    ctx = dbresolver.WithLSNContext(ctx, lsnCtx)
+	// Create LSN context for strict consistency
+	lsnCtx := &dbresolver.LSNContext{
+		RequiredLSN: lastWriteLSN,
+		Level:       dbresolver.ReadYourWrites,
+	}
+	ctx = dbresolver.WithLSNContext(ctx, lsnCtx)
 
-    // This query will ALWAYS use master until replica catches up
-    var product Product
-    err = db.QueryRowContext(ctx,
-        "SELECT * FROM products WHERE name = $1", "Laptop").
-        Scan(&product.ID, &product.Name, &product.Price)
+	// This query will ALWAYS use master until replica catches up
+	var product Product
+	err = db.QueryRowContext(ctx,
+		"SELECT * FROM products WHERE name = $1", "Laptop").
+		Scan(&product.ID, &product.Name, &product.Price)
 
-    // Force master usage regardless of LSN
-    forceMasterCtx := &dbresolver.LSNContext{
-        ForceMaster: true,
-    }
-    ctx = dbresolver.WithLSNContext(ctx, forceMasterCtx)
+	// Force master usage regardless of LSN
+	forceMasterCtx := &dbresolver.LSNContext{
+		ForceMaster: true,
+	}
+	ctx = dbresolver.WithLSNContext(ctx, forceMasterCtx)
 
-    // This query will always use primary
-    var count int
-    err = db.QueryRowContext(ctx,
-        "SELECT COUNT(*) FROM products").Scan(&count)
+	// This query will always use primary
+	var count int
+	err = db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM products").Scan(&count)
 
-    return nil
+	return nil
 }
 ```
 
@@ -287,10 +289,10 @@ func advancedLSNUsage(db dbresolver.DB) error {
 
 ```go
 db := dbresolver.New(
-    dbresolver.WithPrimaryDBs(primaryDB),
-    dbresolver.WithReplicaDBs(replicaDB1, replicaDB2),
-    dbresolver.WithLoadBalancer(dbresolver.RoundRobinLB),
-    dbresolver.WithMaxReplicationLag(1024*1024), // 1MB max lag
+dbresolver.WithPrimaryDBs(primaryDB),
+dbresolver.WithReplicaDBs(replicaDB1, replicaDB2),
+dbresolver.WithLoadBalancer(dbresolver.RoundRobinLB),
+dbresolver.WithMaxReplicationLag(1024*1024), // 1MB max lag
 )
 ```
 
@@ -298,21 +300,21 @@ db := dbresolver.New(
 
 ```go
 ccConfig := &dbresolver.CausalConsistencyConfig{
-    Enabled:          true,                    // Enable LSN features
-    Level:            dbresolver.ReadYourWrites, // Consistency level
-    RequireCookie:    false,                   // Require LSN cookie for reads
-    CookieName:       "pg_min_lsn",           // HTTP cookie name
-    CookieMaxAge:     5 * time.Minute,        // Cookie lifetime
-    FallbackToMaster: true,                    // Fall back to master when needed
-    Timeout:          5 * time.Second,         // LSN query timeout
+Enabled:          true, // Enable LSN features
+Level:            dbresolver.ReadYourWrites, // Consistency level
+RequireCookie:    false,                     // Require LSN cookie for reads
+CookieName:       "pg_min_lsn",              // HTTP cookie name
+CookieMaxAge:     5 * time.Minute, // Cookie lifetime
+FallbackToMaster: true,                    // Fall back to master when needed
+Timeout:          5 * time.Second, // LSN query timeout
 }
 
 db := dbresolver.New(
-    dbresolver.WithPrimaryDBs(primaryDB),
-    dbresolver.WithReplicaDBs(replicaDB),
-    dbresolver.WithCausalConsistency(ccConfig),
-    dbresolver.WithLSNQueryTimeout(3*time.Second),
-    dbresolver.WithLSNThrottleTime(100*time.Millisecond),
+dbresolver.WithPrimaryDBs(primaryDB),
+dbresolver.WithReplicaDBs(replicaDB),
+dbresolver.WithCausalConsistency(ccConfig),
+dbresolver.WithLSNQueryTimeout(3*time.Second),
+dbresolver.WithLSNThrottleTime(100*time.Millisecond),
 )
 ```
 
@@ -320,11 +322,11 @@ db := dbresolver.New(
 
 ```go
 db := dbresolver.New(
-    // ... other options ...
-    dbresolver.WithMaxReplicationLag(512*1024),      // Max 512KB lag
-    dbresolver.WithLSNQueryTimeout(2*time.Second),   // Faster LSN queries
-    dbresolver.WithLSNThrottleTime(50*time.Millisecond), // More frequent checks
-    EnableLSNMonitoring(),                           // Enable background monitoring
+// ... other options ...
+dbresolver.WithMaxReplicationLag(512*1024), // Max 512KB lag
+dbresolver.WithLSNQueryTimeout(2*time.Second), // Faster LSN queries
+dbresolver.WithLSNThrottleTime(50*time.Millisecond), // More frequent checks
+EnableLSNMonitoring(), // Enable background monitoring
 )
 ```
 
@@ -395,11 +397,11 @@ sequenceDiagram
 
 Based on our internal testing with PostgreSQL 14:
 
-| Operation | Without LSN | With LSN (Replica Hit) | With LSN (Master Fallback) |
-|-----------|-------------|-------------------------|----------------------------|
-| Simple SELECT | 0.5ms | 0.6ms (+20%) | 0.8ms (+60%) |
-| INSERT + SELECT | 1.2ms | 1.5ms (+25%) | 1.6ms (+33%) |
-| Batch Read (100 rows) | 15ms | 16ms (+6%) | 18ms (+20%) |
+| Operation             | Without LSN | With LSN (Replica Hit) | With LSN (Master Fallback) |
+|-----------------------|-------------|------------------------|----------------------------|
+| Simple SELECT         | 0.5ms       | 0.6ms (+20%)           | 0.8ms (+60%)               |
+| INSERT + SELECT       | 1.2ms       | 1.5ms (+25%)           | 1.6ms (+33%)               |
+| Batch Read (100 rows) | 15ms        | 16ms (+6%)             | 18ms (+20%)                |
 
 ### Memory Overhead
 
@@ -419,15 +421,17 @@ Based on our internal testing with PostgreSQL 14:
 ### Primary Database Usage
 
 Primary Database is used when you call these functions:
+
 - `Exec`, `ExecContext`
 - `Begin`, `BeginTx`
 - Queries with `"RETURNING"` clause:
-  - `Query`, `QueryContext`
-  - `QueryRow`, `QueryRowContext`
+    - `Query`, `QueryContext`
+    - `QueryRow`, `QueryRowContext`
 
 ### Replica Database Usage
 
 Replica Databases will be used when you call these functions:
+
 - `Query`, `QueryContext`
 - `QueryRow`, `QueryRowContext`
 
@@ -446,19 +450,19 @@ Replica Databases will be used when you call these functions:
 ```go
 // Check if LSN features are enabled
 if db.IsCausalConsistencyEnabled() {
-    fmt.Println("LSN-based routing is active")
+fmt.Println("LSN-based routing is active")
 }
 
 // Get current master LSN
 masterLSN, err := db.GetCurrentMasterLSN(ctx)
 if err == nil {
-    fmt.Printf("Master LSN: %s\n", masterLSN.String())
+fmt.Printf("Master LSN: %s\n", masterLSN.String())
 }
 
 // Get last known master LSN (cached)
 lastKnown := db.GetLastKnownMasterLSN()
 if lastKnown != nil {
-    fmt.Printf("Last known LSN: %s\n", lastKnown.String())
+fmt.Printf("Last known LSN: %s\n", lastKnown.String())
 }
 ```
 
@@ -468,18 +472,18 @@ if lastKnown != nil {
 // Get status of all replicas
 statuses := db.GetReplicaStatus()
 for i, status := range statuses {
-    fmt.Printf("Replica %d:\n", i+1)
-    fmt.Printf("  Healthy: %t\n", status.IsHealthy)
-    fmt.Printf("  Lag: %d bytes\n", status.LagBytes)
-    fmt.Printf("  Last Check: %s\n", status.LastCheck.Format(time.RFC3339))
+fmt.Printf("Replica %d:\n", i+1)
+fmt.Printf("  Healthy: %t\n", status.IsHealthy)
+fmt.Printf("  Lag: %d bytes\n", status.LagBytes)
+fmt.Printf("  Last Check: %s\n", status.LastCheck.Format(time.RFC3339))
 
-    if status.LastLSN != nil {
-        fmt.Printf("  LSN: %s\n", status.LastLSN.String())
-    }
+if status.LastLSN != nil {
+fmt.Printf("  LSN: %s\n", status.LastLSN.String())
+}
 
-    if status.LastError != nil {
-        fmt.Printf("  Error: %v\n", status.LastError)
-    }
+if status.LastError != nil {
+fmt.Printf("  Error: %v\n", status.LastError)
+}
 }
 ```
 
@@ -502,18 +506,18 @@ for i, status := range statuses {
 ```go
 // Before: Basic resolver
 db := dbresolver.New(
-    dbresolver.WithPrimaryDBs(primaryDB),
-    dbresolver.WithReplicaDBs(replicaDB),
+dbresolver.WithPrimaryDBs(primaryDB),
+dbresolver.WithReplicaDBs(replicaDB),
 )
 
 // After: Add LSN support
 db := dbresolver.New(
-    dbresolver.WithPrimaryDBs(primaryDB),
-    dbresolver.WithReplicaDBs(replicaDB),
-    dbresolver.WithCausalConsistency(&dbresolver.CausalConsistencyConfig{
-        Enabled: true,
-        Level:   dbresolver.ReadYourWrites,
-    }),
+dbresolver.WithPrimaryDBs(primaryDB),
+dbresolver.WithReplicaDBs(replicaDB),
+dbresolver.WithCausalConsistency(&dbresolver.CausalConsistencyConfig{
+Enabled: true,
+Level:   dbresolver.ReadYourWrites,
+}),
 )
 ```
 
@@ -526,9 +530,9 @@ dbresolver.WithLoadBalancer(dbresolver.RoundRobinLB)
 // New config with LSN
 dbresolver.WithLoadBalancer(dbresolver.RoundRobinLB),
 dbresolver.WithCausalConsistency(&dbresolver.CausalConsistencyConfig{
-    Enabled:          true,
-    Level:            dbresolver.ReadYourWrites,
-    FallbackToMaster: true,
+Enabled:          true,
+Level:            dbresolver.ReadYourWrites,
+FallbackToMaster: true,
 }),
 dbresolver.WithLSNQueryTimeout(3*time.Second),
 ```
@@ -584,13 +588,14 @@ dbresolver.WithLSNQueryTimeout(3*time.Second),
 ## Support
 
 You can file an [Issue](https://github.com/alfari16/go-pgrouter/issues/new).
-See documentation in [Go.Dev](https://pkg.go.dev/github.com/alfari16/go-pgrouter/v2?tab=doc)
+See documentation in [Go.Dev](https://pkg.go.dev/github.com/alfari16/go-pgrouter?tab=doc)
 
 ## Contribution
 
 To contrib to this project, you can open a PR or an issue.
 
 When contributing:
+
 - Ensure backward compatibility
 - Add tests for new features
 - Update documentation
