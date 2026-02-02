@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
-	github.com/lib/pq v1.10.9
+	github.com/lib/pq v1.11.1
 	go.uber.org/multierr v1.11.0
 )
 
